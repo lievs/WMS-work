@@ -160,6 +160,21 @@ def _ensure_indexes():
             except Exception as exc:  # noqa: BLE001
                 print(f"[schema] Не удалось создать индекс {index_name}: {exc}")
 
+    # Идемпотентность добавления товара требует именно уникальности токена,
+    # в том числе на базах, где колонка появилась через ALTER TABLE.
+    if inspector.has_table("receiving_lines"):
+        try:
+            with db.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        '"uq_receiving_lines_request_token" '
+                        'ON "receiving_lines" ("request_token")'
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[schema] Не удалось создать индекс токенов приемки: {exc}")
+
 
 def _register_sqlite_tuning():
     """SQLite-специфичные настройки:

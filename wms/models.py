@@ -637,6 +637,10 @@ class ReceivingLine(db.Model):
     # короб при приемке (box_id заполнен), разбраковка не применяется —
     # остается 0.
     defect_qty = db.Column(db.Float, nullable=False, default=0)
+    # Один токен соответствует одному нажатию «Добавить». Повторная
+    # отправка той же формы (двойной клик/зависший интернет) находит уже
+    # созданную строку и не проводит приемку второй раз.
+    request_token = db.Column(db.String(64), nullable=True)
 
     nomenclature = db.relationship("Nomenclature")
     box = db.relationship("Box")

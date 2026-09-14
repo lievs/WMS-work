@@ -1,4 +1,5 @@
 import io
+import secrets
 from datetime import datetime
 
 from flask import (
@@ -14,6 +15,7 @@ from flask import (
 )
 from flask_login import current_user
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 
 from ..extensions import db
 from ..models import (
@@ -326,7 +328,11 @@ def confirm_invoice(doc_id):
     lines = doc.lines.order_by(ReceivingLine.id).all()
     confirmed_count = sum(1 for line in lines if line.confirmed)
     return render_template(
-        "receiving/confirm_invoice.html", doc=doc, lines=lines, confirmed_count=confirmed_count
+        "receiving/confirm_invoice.html",
+        doc=doc,
+        lines=lines,
+        confirmed_count=confirmed_count,
+        add_request_token=secrets.token_urlsafe(24),
     )
 
 
@@ -417,14 +423,43 @@ def detail(doc_id):
         active_box=active_box,
         packed_boxes=packed_boxes,
         warehouses=warehouses,
+        add_request_token=secrets.token_urlsafe(24),
     )
 
 
-def _add_or_increment_line(doc, nomenclature, qty):
-    line = ReceivingLine(document_id=doc.id, nomenclature_id=nomenclature.id, qty=qty)
+def _existing_add_request(request_token):
+    if not request_token:
+        return None
+    return ReceivingLine.query.filter_by(request_token=request_token).first()
+
+
+def _commit_receiving_add(line, request_token):
+    """Коммитит добавление и превращает гонку одинаковых запросов в
+    безопасный повтор. Уникальный индекс защищает даже два одновременных
+    запроса, пришедших в разные процессы приложения."""
+    try:
+        db.session.commit()
+        return line, False
+    except IntegrityError:
+        db.session.rollback()
+        existing = _existing_add_request(request_token)
+        if existing:
+            return existing, True
+        raise
+
+
+def _add_or_increment_line(doc, nomenclature, qty, request_token=None):
+    existing = _existing_add_request(request_token)
+    if existing:
+        return existing, True
+    line = ReceivingLine(
+        document_id=doc.id,
+        nomenclature_id=nomenclature.id,
+        qty=qty,
+        request_token=request_token or None,
+    )
     db.session.add(line)
-    db.session.commit()
-    return line
+    return _commit_receiving_add(line, request_token)
 
 
 def _box_category_warning(box, item):
@@ -448,7 +483,7 @@ def _box_category_warning(box, item):
     return {"category": category.name, "qty": total, "threshold": category.box_qty_warning}
 
 
-def _receive_item_into_box(doc, box, item, qty):
+def _receive_item_into_box(doc, box, item, qty, request_token=None):
     """Приемка сразу в короб — товар физически упаковывается в момент
     приемки, минуя неразмещенный остаток (см. complete(): строки с box_id
     в него не идут).
@@ -458,6 +493,10 @@ def _receive_item_into_box(doc, box, item, qty):
     физически это те же единицы, которые наконец кладут в короб, и
     списываем их со старого остатка вместо того, чтобы задваивать учет
     (остаток "висел" неразмещенным — и теперь еще и в коробе)."""
+    existing = _existing_add_request(request_token)
+    if existing:
+        return existing, None, True
+
     dedup_qty = min(qty, UnplacedStock.available(doc.warehouse_id, item.id))
     if dedup_qty > 0:
         UnplacedStock.consume(doc.warehouse_id, item.id, dedup_qty)
@@ -469,11 +508,19 @@ def _receive_item_into_box(doc, box, item, qty):
         box_item = BoxItem(box_id=box.id, nomenclature_id=item.id, qty=qty)
         db.session.add(box_item)
 
-    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=qty, box_id=box.id)
+    line = ReceivingLine(
+        document_id=doc.id,
+        nomenclature_id=item.id,
+        qty=qty,
+        box_id=box.id,
+        request_token=request_token or None,
+    )
     db.session.add(line)
-    db.session.commit()
+    line, duplicate = _commit_receiving_add(line, request_token)
+    if duplicate:
+        return line, None, True
     warning = _box_category_warning(box, item)
-    return line, warning
+    return line, warning, False
 
 
 @bp.route("/<int:doc_id>/boxes/select", methods=["POST"])
@@ -527,15 +574,18 @@ def add_line_to_box_by_barcode(doc_id, box_id):
     if not box:
         return jsonify({"ok": False, "error": "Короб не найден"}), 404
 
-    barcode = (request.json or {}).get("barcode", "").strip()
-    qty = float((request.json or {}).get("qty", 1) or 1)
+    payload = request.json or {}
+    barcode = payload.get("barcode", "").strip()
+    qty = float(payload.get("qty", 1) or 1)
+    request_token = str(payload.get("request_token", ""))[:64]
     item = Nomenclature.query.filter_by(barcode=barcode).first()
     if not item:
         return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
 
-    line, warning = _receive_item_into_box(doc, box, item, qty)
+    line, warning, duplicate = _receive_item_into_box(doc, box, item, qty, request_token)
     resp = {
         "ok": True,
+        "duplicate": duplicate,
         "line": {"id": line.id, "name": item.name, "sku": item.sku, "qty": line.qty},
         "box_item_count": box.items.count(),
     }
@@ -560,7 +610,11 @@ def add_line_to_box(doc_id, box_id):
         flash("Товар не найден", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc.id, box=box_id))
 
-    _line, warning = _receive_item_into_box(doc, box, item, qty)
+    request_token = request.form.get("request_token", "")[:64]
+    _line, warning, duplicate = _receive_item_into_box(doc, box, item, qty, request_token)
+    if duplicate:
+        flash("Повторный запрос распознан — товар второй раз не добавлен", "info")
+        return redirect(url_for("receiving.detail", doc_id=doc.id))
     flash(f"В короб {box.box_number} добавлено: {item.name} ({qty} {item.unit})", "success")
     if warning:
         flash(
@@ -581,16 +635,19 @@ def add_line_by_barcode(doc_id):
     if doc.status != "draft":
         return jsonify({"ok": False, "error": "Документ уже завершен"}), 400
 
-    barcode = (request.json or {}).get("barcode", "").strip()
-    qty = (request.json or {}).get("qty", 1) or 1
+    payload = request.json or {}
+    barcode = payload.get("barcode", "").strip()
+    qty = payload.get("qty", 1) or 1
+    request_token = str(payload.get("request_token", ""))[:64]
     item = Nomenclature.query.filter_by(barcode=barcode).first()
     if not item:
         return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
 
-    line = _add_or_increment_line(doc, item, float(qty))
+    line, duplicate = _add_or_increment_line(doc, item, float(qty), request_token)
     return jsonify(
         {
             "ok": True,
+            "duplicate": duplicate,
             "line": {"id": line.id, "name": item.name, "sku": item.sku, "qty": line.qty},
         }
     )
@@ -622,7 +679,11 @@ def add_line(doc_id):
         flash("Товар не найден", "danger")
         return redirect(redirect_url)
 
-    _add_or_increment_line(doc, item, qty)
+    request_token = request.form.get("request_token", "")[:64]
+    _line, duplicate = _add_or_increment_line(doc, item, qty, request_token)
+    if duplicate:
+        flash("Повторный запрос распознан — товар второй раз не добавлен", "info")
+        return redirect(redirect_url)
     flash(f"Добавлено: {item.name} ({qty} {item.unit})", "success")
     return redirect(redirect_url)
 

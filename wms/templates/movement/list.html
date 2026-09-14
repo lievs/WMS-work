@@ -35,20 +35,14 @@
         потребности по его содержимому нет ни на одном складе-городе по текущему плану отгрузок.
       </div>
     {% elif route_box %}
-      {% set total_demand = routing | sum(attribute='total_remaining') %}
       <div class="mt-3">
-        <div class="mb-2">
-          Короб <b>{{ route_box.box_number }}</b> — общая невыполненная потребность на подходящих складах:
-          <b>{{ total_demand | round(0, 'floor') | int }} шт.</b>
-        </div>
+        <div class="mb-2"><b>{{ route_box.box_number }}</b></div>
         <table class="table table-sm table-mobile-compact">
-          <thead><tr><th>Склад-город</th><th>Покрывает</th><th>Нужно всего</th><th></th></tr></thead>
+          <thead><tr><th>Склад-город</th><th></th></tr></thead>
           <tbody>
           {% for entry in routing %}
             <tr{% if loop.first %} class="table-success"{% endif %}>
               <td>{{ entry.warehouse.name }}{% if loop.first %} <span class="badge bg-success">рекомендуем</span>{% endif %}</td>
-              <td>{{ entry.matched_qty | round(0, 'floor') | int }} шт.</td>
-              <td>{{ entry.total_remaining | round(0, 'floor') | int }} шт.</td>
               <td>
                 <form method="post" action="{{ url_for('movement.route_box_add') }}">
                   <input type="hidden" name="box_id" value="{{ route_box.id }}">

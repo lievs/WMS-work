@@ -13,7 +13,7 @@ from flask import (
     url_for,
 )
 from flask_login import current_user
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from ..extensions import db
 from ..models import (
@@ -28,7 +28,7 @@ from ..models import (
     UnplacedStockLot,
     Warehouse,
 )
-from ..utils.document_access import ensure_view_document_access, owned_query
+from ..utils.document_access import get_owned_or_404
 from ..utils.excel_io import export_receiving_to_excel, timestamp_for_filename
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
@@ -39,12 +39,44 @@ bp = Blueprint("receiving", __name__)
 
 @bp.before_request
 def _restrict_document_access():
-    ensure_view_document_access(ReceivingDocument)
+    document_id = (request.view_args or {}).get("doc_id")
+    if document_id is None:
+        return None
+
+    doc = ReceivingDocument.query.get_or_404(document_id)
+    if (
+        request.method == "GET"
+        and current_user.can_view_invoice_receivings()
+        and doc.is_from_invoice_import()
+    ):
+        return None
+    get_owned_or_404(ReceivingDocument, document_id)
+    return None
+
+
+def _visible_receiving_query():
+    """Приемки, видимые пользователю в списке."""
+    query = ReceivingDocument.query
+    if current_user.is_admin:
+        return query
+    if current_user.can_view_invoice_receivings():
+        return query.filter(
+            or_(
+                ReceivingDocument.created_by_id == current_user.id,
+                ReceivingDocument.invoice_file_name.isnot(None),
+            )
+        )
+    return query.filter(ReceivingDocument.created_by_id == current_user.id)
 
 
 def _receiving_warehouses():
-    """В приемке доступны только два физических склада."""
-    allowed_names = ("основной", "основной склад", "склад №2")
+    """В приемке доступны только согласованные физические склады."""
+    allowed_names = (
+        "основной",
+        "основной склад",
+        "склад №2",
+        "склад №2 (шоссейная 167)",
+    )
     warehouses = (
         Warehouse.query.filter(
             Warehouse.is_active.is_(True),
@@ -55,13 +87,13 @@ def _receiving_warehouses():
     )
     if warehouses:
         return warehouses
-    # Обратная совместимость для старой базы, где два физических склада
-    # могли называться иначе: до переименования берем первые два по коду,
+    # Обратная совместимость для старой базы, где физические склады могли
+    # называться иначе: до переименования берем первые три по коду,
     # но склады-городá маркетплейсов в приемку никогда не попадают.
     return (
         Warehouse.query.filter_by(is_active=True, marketplace=None)
         .order_by(Warehouse.code)
-        .limit(2)
+        .limit(3)
         .all()
     )
 
@@ -91,7 +123,7 @@ def list_documents():
     unfinished_only = request.args.get("unfinished") == "on"
     invoice_only = request.args.get("invoice_only") == "on"
 
-    query = owned_query(ReceivingDocument)
+    query = _visible_receiving_query()
     if unfinished_only:
         query = query.filter(ReceivingDocument.status != "completed")
     if invoice_only:
@@ -117,9 +149,16 @@ def returns_list():
 
     query = SupplierReturn.query
     if not current_user.is_admin:
-        query = query.join(ReceivingDocument).filter(
-            ReceivingDocument.created_by_id == current_user.id
-        )
+        query = query.join(ReceivingDocument)
+        if current_user.can_view_invoice_receivings():
+            query = query.filter(
+                or_(
+                    ReceivingDocument.created_by_id == current_user.id,
+                    ReceivingDocument.invoice_file_name.isnot(None),
+                )
+            )
+        else:
+            query = query.filter(ReceivingDocument.created_by_id == current_user.id)
     if unsynced_only:
         query = query.filter(SupplierReturn.synced_to_1c_at.is_(None))
 
@@ -140,7 +179,7 @@ def new_document():
 
     warehouse = _receiving_warehouse_or_none(warehouse_id)
     if not warehouse:
-        flash("Для приемки выберите склад «Основной» или «Склад №2»", "danger")
+        flash("Для приемки выберите один из разрешенных складов", "danger")
         return redirect(url_for("receiving.new_document"))
 
     doc = ReceivingDocument(
@@ -197,7 +236,7 @@ def import_invoice_form():
     warehouse_id = request.form.get("warehouse_id", type=int)
     warehouse = _receiving_warehouse_or_none(warehouse_id)
     if not warehouse:
-        flash("Для приемки выберите склад «Основной» или «Склад №2»", "danger")
+        flash("Для приемки выберите один из разрешенных складов", "danger")
         return redirect(url_for("receiving.import_invoice_form"))
 
     file = request.files.get("file")
@@ -600,7 +639,7 @@ def update_line(doc_id, line_id):
 
     line = ReceivingLine.query.filter_by(id=line_id, document_id=doc_id).first_or_404()
     qty = request.form.get("qty", type=float)
-    if qty is None or qty <= 0:
+    if qty is None or qty < 0:
         flash("Укажите корректное количество", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
@@ -612,6 +651,8 @@ def update_line(doc_id, line_id):
                 db.session.delete(box_item)
 
     line.qty = qty
+    if doc.status == "recounting" and line.expected_qty is not None:
+        line.confirmed = True
     db.session.commit()
     flash(f"Количество обновлено: {line.nomenclature.name} — {qty} {line.nomenclature.unit}", "success")
     return redirect(url_for("receiving.detail", doc_id=doc_id))
@@ -637,7 +678,12 @@ def update_lines_bulk(doc_id):
             qty = float(raw)
         except ValueError:
             continue
-        if qty <= 0 or qty == line.qty:
+        if qty < 0:
+            continue
+
+        if doc.status == "recounting" and line.expected_qty is not None:
+            line.confirmed = True
+        if qty == line.qty:
             continue
 
         if line.box_id:
@@ -727,7 +773,7 @@ def change_warehouse(doc_id):
     warehouse_id = request.form.get("warehouse_id", type=int)
     warehouse = _receiving_warehouse_or_none(warehouse_id)
     if not warehouse:
-        flash("Для приемки выберите склад «Основной» или «Склад №2»", "danger")
+        flash("Для приемки выберите один из разрешенных складов", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
     doc.warehouse_id = warehouse.id
@@ -834,6 +880,11 @@ def complete(doc_id):
             # неразмещенный остаток и разбраковку. Короб останется без
             # ячейки, пока его не разместят обычным способом через
             # «Размещение».
+            continue
+        # У строки из накладной qty до подтверждения равно заявленному
+        # поставщиком количеству. Неподтвержденная позиция не является
+        # фактически принятой и не должна создавать остаток на нашем складе.
+        if line.expected_qty is not None and not line.confirmed:
             continue
         good_qty = line.good_qty()
         if good_qty > 0:

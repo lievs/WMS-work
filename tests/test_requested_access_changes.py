@@ -69,16 +69,49 @@ def test_staff_sees_only_own_documents_and_cannot_open_foreign(db, client):
         assert client.get(detail_path.format(id=foreign.id)).status_code == 404
 
 
+def test_invoice_receiving_view_permission_shows_foreign_invoice_read_only(db, client):
+    receiver = _user("invoice-receiver")
+    author = _user("invoice-author")
+    receiver.invoice_receiving_view_allowed = True
+    warehouse = Warehouse(code="WH-INVOICE-VIEW", name="Основной")
+    db.session.add(warehouse)
+    db.session.commit()
+    invoice = ReceivingDocument(
+        number="INVOICE-SHARED",
+        warehouse_id=warehouse.id,
+        created_by_id=author.id,
+        invoice_file_name="накладная.xlsx",
+    )
+    manual = ReceivingDocument(
+        number="MANUAL-PRIVATE",
+        warehouse_id=warehouse.id,
+        created_by_id=author.id,
+    )
+    db.session.add_all([invoice, manual])
+    db.session.commit()
+
+    _login(client, receiver)
+    html = client.get("/receiving/").get_data(as_text=True)
+    assert invoice.number in html
+    assert manual.number not in html
+    assert client.get(f"/receiving/{invoice.id}").status_code == 200
+    assert client.get(f"/receiving/{manual.id}").status_code == 404
+    # Право только на просмотр: менять чужую приемку нельзя.
+    assert client.post(f"/receiving/{invoice.id}/send-to-recount").status_code == 404
+
+
 def test_receiving_offers_only_main_and_second_warehouse(db, client_logged_in):
     main = Warehouse(code="WH-001", name="Основной")
     second = Warehouse(code="WH-002", name="Склад №2")
+    shosseynaya = Warehouse(code="WH-002-A", name="Склад №2 (Шоссейная 167)")
     hidden = Warehouse(code="WH-003", name="Транзитный")
-    db.session.add_all([main, second, hidden])
+    db.session.add_all([main, second, shosseynaya, hidden])
     db.session.commit()
 
     html = client_logged_in.get("/receiving/new").get_data(as_text=True)
     assert "Основной" in html
     assert "Склад №2" in html
+    assert "Склад №2 (Шоссейная 167)" in html
     assert "Транзитный" not in html
 
     client_logged_in.post("/receiving/new", data={"warehouse_id": hidden.id})

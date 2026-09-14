@@ -59,6 +59,7 @@
                 </button>
                 {% if not u.nomenclature_edit_allowed %}<div class="text-muted small">ред. номенклатуры запрещено</div>{% endif %}
                 {% if u.warehouse_mapping_allowed %}<div class="text-muted small">сопоставление складов 1С разрешено</div>{% endif %}
+                {% if u.invoice_receiving_view_allowed %}<div class="text-muted small">видит все приемки по накладным</div>{% endif %}
 
                 <div class="modal fade" id="sectionsModal{{ u.id }}" tabindex="-1" aria-hidden="true">
                   <div class="modal-dialog">
@@ -101,6 +102,11 @@
                             <label class="form-check-label" for="warehouseMapping{{ u.id }}">Разрешить сопоставление складов с 1С</label>
                             <div class="text-muted small">Функция находится в разделе «Склады и ячейки». Пользователю также нужен доступ к этому разделу.</div>
                           </div>
+                          <div class="form-check mt-3">
+                            <input class="form-check-input" type="checkbox" name="invoice_receiving_view" id="invoiceReceivingView{{ u.id }}" {% if u.invoice_receiving_view_allowed %}checked{% endif %}>
+                            <label class="form-check-label" for="invoiceReceivingView{{ u.id }}">Просмотр всех приемок по накладным</label>
+                            <div class="text-muted small">Выдайте это право приемщику и заведующему складом. Ручные приемки других сотрудников останутся скрыты.</div>
+                          </div>
                         </div>
                         <div class="modal-footer">
                           <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
@@ -132,6 +138,12 @@
             <td class="text-nowrap">
               <form method="post" action="{{ url_for('auth.reset_password', user_id=u.id) }}" class="d-inline">
                 <button type="submit" class="btn btn-sm btn-outline-secondary">Сбросить пароль</button>
+              </form>
+              <form method="post" action="{{ url_for('auth.revoke_sessions', user_id=u.id) }}" class="d-inline"
+                    onsubmit="return confirm('{{ 'Завершить все сессии на других устройствах?' if u.id == current_user.id else 'Завершить все активные сессии пользователя?' }}');">
+                <button type="submit" class="btn btn-sm btn-outline-warning">
+                  {{ 'Завершить другие сессии' if u.id == current_user.id else 'Завершить сессии' }}
+                </button>
               </form>
               {% if u.id != current_user.id %}
               <form method="post" action="{{ url_for('auth.toggle_user', user_id=u.id) }}" class="d-inline">

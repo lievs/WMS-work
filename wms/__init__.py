@@ -1,9 +1,9 @@
 import os
 import secrets
 
-from flask import Flask, flash, redirect, request, url_for
-from flask_login import current_user
-from sqlalchemy import event, inspect, text
+from flask import Flask, flash, redirect, request, session, url_for
+from flask_login import current_user, logout_user
+from sqlalchemy import event, inspect, select, text
 from sqlalchemy.engine import Engine
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -106,6 +106,27 @@ def _ensure_columns():
                             )
                         )
                     print("[schema] users.warehouse_mapping_allowed заполнен для уже существующих пользователей")
+                if table.name == "users" and column.name == "session_version":
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET session_version = 0 "
+                                "WHERE session_version IS NULL"
+                            )
+                        )
+                    print("[schema] users.session_version заполнен для уже существующих пользователей")
+                if table.name == "users" and column.name == "invoice_receiving_view_allowed":
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET invoice_receiving_view_allowed = 0 "
+                                "WHERE invoice_receiving_view_allowed IS NULL"
+                            )
+                        )
+                    print(
+                        "[schema] users.invoice_receiving_view_allowed заполнен "
+                        "для уже существующих пользователей"
+                    )
             except Exception as exc:  # noqa: BLE001
                 print(f"[schema] Не удалось добавить {table.name}.{column.name}: {exc}")
 
@@ -280,9 +301,31 @@ def create_app(config_class=Config):
     @app.before_request
     def require_login():
         from .blueprints.integration_1c import API_1C_PUBLIC_ENDPOINTS
+        from .models import User
 
         if request.endpoint is None:
             return None
+        if current_user.is_authenticated:
+            cookie_version = session.get("session_version")
+            # Читаем скалярным запросом прямо из БД, а не из уже загруженного
+            # объекта current_user: так отзыв сессий сразу виден и при
+            # нескольких процессах приложения.
+            current_version = (
+                db.session.execute(
+                    select(User.session_version).where(User.id == current_user.id)
+                ).scalar_one()
+                or 0
+            )
+            # Тесты старых маршрутов подставляют _user_id напрямую, без
+            # настоящего login_user. В рабочем приложении отсутствие версии
+            # означает старую/недействительную cookie и требует нового входа.
+            if cookie_version is None and app.testing:
+                session["session_version"] = current_version
+            elif cookie_version != current_version:
+                logout_user()
+                session.pop("session_version", None)
+                flash("Сессия завершена администратором. Войдите снова.", "warning")
+                return redirect(url_for("auth.login"))
         if (
             request.endpoint == "static"
             or request.endpoint.startswith("auth.")

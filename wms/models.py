@@ -109,6 +109,14 @@ class User(UserMixin, db.Model):
     # 1С. Сама страница складов доступна по allowed_sections, а эта галочка
     # разрешает только чувствительную интеграционную настройку.
     warehouse_mapping_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Право видеть все приемки, созданные из накладных. Используется для
+    # приемщиков и заведующих складом; ручные приемки других сотрудников
+    # этот флаг не открывает.
+    invoice_receiving_view_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Версия входа используется для принудительного завершения сессий.
+    # Она записывается в cookie при авторизации; увеличение значения делает
+    # все ранее выданные cookie пользователя недействительными.
+    session_version = db.Column(db.Integer, nullable=False, default=0)
 
     def is_production_only(self):
         return self.role == "production" and not self.is_admin
@@ -129,6 +137,9 @@ class User(UserMixin, db.Model):
 
     def can_manage_warehouse_mapping(self):
         return self.is_admin or self.warehouse_mapping_allowed is True
+
+    def can_view_invoice_receivings(self):
+        return self.is_admin or self.invoice_receiving_view_allowed is True
 
     def has_section_access(self, section):
         """Раздел не из SECTIONS (например, служебные api/boxes/labels) не

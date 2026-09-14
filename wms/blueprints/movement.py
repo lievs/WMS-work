@@ -19,12 +19,18 @@ from ..models import (
     Warehouse,
 )
 from ..utils.excel_io import export_movement_to_excel, timestamp_for_filename
+from ..utils.document_access import ensure_view_document_access, owned_query
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 from ..utils.shipping_label_pdf import build_movement_shipping_labels_pdf
 from ..utils.waybill_pdf import build_movement_waybills_pdf
 
 bp = Blueprint("movement", __name__)
+
+
+@bp.before_request
+def _restrict_document_access():
+    ensure_view_document_access(MovementDocument)
 
 SHIPPING_LABEL_SENDER_KEY = "movement_shipping_label_sender"
 
@@ -120,7 +126,7 @@ def _compute_routing(box):
 
 @bp.route("/")
 def list_documents():
-    documents = MovementDocument.query.order_by(MovementDocument.created_at.desc()).all()
+    documents = owned_query(MovementDocument).order_by(MovementDocument.created_at.desc()).all()
     return render_template(
         "movement/list.html",
         documents=documents,
@@ -138,7 +144,7 @@ def route_box():
     ни у кого, и короб можно пропустить). Только просмотр — сам короб
     добавляется в конкретное перемещение отдельным действием ниже."""
     box_number = request.args.get("box_number", "").strip()
-    documents = MovementDocument.query.order_by(MovementDocument.created_at.desc()).all()
+    documents = owned_query(MovementDocument).order_by(MovementDocument.created_at.desc()).all()
 
     box = None
     routing = []
@@ -167,7 +173,7 @@ def find_box():
     новое перемещение не дает блокировка "уже в другом перемещении" (см.
     _find_conflicting_movement_line) — здесь видно, в каком именно."""
     box_number = request.args.get("box_number", "").strip()
-    documents = MovementDocument.query.order_by(MovementDocument.created_at.desc()).all()
+    documents = owned_query(MovementDocument).order_by(MovementDocument.created_at.desc()).all()
 
     box = None
     not_found = False
@@ -180,6 +186,11 @@ def find_box():
             lines = (
                 MovementLine.query.filter_by(box_id=box.id)
                 .join(MovementDocument, MovementLine.document_id == MovementDocument.id)
+                .filter(
+                    True
+                    if current_user.is_admin
+                    else MovementDocument.created_by_id == current_user.id
+                )
                 .order_by(MovementDocument.created_at.desc())
                 .all()
             )
@@ -240,6 +251,16 @@ def _conflict_status_label(document):
     return "черновик" if document.status == "draft" else "в пути, еще не принят"
 
 
+def _conflict_message(box, conflict):
+    if current_user.is_admin or conflict.document.created_by_id == current_user.id:
+        return (
+            f"Короб {box.box_number} уже отсканирован в другое перемещение "
+            f"{conflict.document.number} ({_conflict_status_label(conflict.document)}) — "
+            "сначала уберите его оттуда."
+        )
+    return f"Короб {box.box_number} уже используется в другом активном перемещении."
+
+
 @bp.route("/route-box/add", methods=["POST"])
 def route_box_add():
     """Быстрое добавление короба (найденного через route_box) в перемещение
@@ -252,7 +273,7 @@ def route_box_add():
     to_warehouse = Warehouse.query.get_or_404(to_warehouse_id)
 
     doc = (
-        MovementDocument.query.filter_by(
+        owned_query(MovementDocument).filter_by(
             from_warehouse_id=box.warehouse_id, to_warehouse_id=to_warehouse_id, status="draft"
         )
         .order_by(MovementDocument.created_at.desc())
@@ -274,12 +295,7 @@ def route_box_add():
 
     conflict = _find_conflicting_movement_line(box, exclude_doc_id=doc.id)
     if conflict:
-        flash(
-            f"Короб {box.box_number} уже отсканирован в другое перемещение "
-            f"{conflict.document.number} ({_conflict_status_label(conflict.document)}) — "
-            f"сначала уберите его оттуда.",
-            "danger",
-        )
+        flash(_conflict_message(box, conflict), "danger")
         return redirect(url_for("movement.list_documents"))
 
     _create_movement_line(doc, box)
@@ -287,8 +303,77 @@ def route_box_add():
     # Не уводим в сам документ перемещения — сборщик сканирует короба один
     # за другим на этой же странице; открыть документ можно из списка ниже,
     # когда сборка закончена.
-    flash(f"Короб {box.box_number} добавлен в перемещение {doc.number} на «{to_warehouse.name}»", "success")
+    contents = ", ".join(
+        f"{item.nomenclature.name}: {item.qty:g} {item.nomenclature.unit}"
+        for item in box.items
+    ) or "короб пуст"
+    flash(
+        f"Короб {box.box_number} добавлен в перемещение {doc.number} на «{to_warehouse.name}». "
+        f"Содержимое: {contents}",
+        "success",
+    )
     return redirect(url_for("movement.list_documents"))
+
+
+@bp.route("/box-transfer")
+def box_transfer():
+    """Отдельная операция перепаковки товара из одного короба в другой."""
+    source_number = request.args.get("source_box_number", "").strip()
+    source_box = Box.find_by_scanned_code(source_number) if source_number else None
+    return render_template(
+        "movement/box_transfer.html",
+        source_box_number=source_number,
+        source_box=source_box,
+        source_not_found=bool(source_number and not source_box),
+        items=source_box.items.all() if source_box else [],
+    )
+
+
+@bp.route("/box-transfer/items/<int:item_id>", methods=["POST"])
+def transfer_box_item(item_id):
+    source_box_id = request.form.get("source_box_id", type=int)
+    box_item = BoxItem.query.filter_by(id=item_id, box_id=source_box_id).first_or_404()
+    source_box = box_item.box
+    target_number = request.form.get("target_box_number", "").strip()
+    qty = request.form.get("qty", type=float)
+
+    if not qty or qty <= 0 or qty > box_item.qty:
+        flash(f"Укажите корректное количество (доступно {box_item.qty:g})", "danger")
+        return redirect(url_for("movement.box_transfer", source_box_number=source_box.box_number))
+
+    target_box = Box.find_by_scanned_code(target_number, warehouse_id=source_box.warehouse_id)
+    if not target_box:
+        flash(
+            f"Короб '{target_number}' не найден на складе «{source_box.warehouse.name}»",
+            "danger",
+        )
+        return redirect(url_for("movement.box_transfer", source_box_number=source_box.box_number))
+    if target_box.id == source_box.id:
+        flash("Целевой короб совпадает с исходным", "danger")
+        return redirect(url_for("movement.box_transfer", source_box_number=source_box.box_number))
+
+    item = box_item.nomenclature
+    box_item.qty -= qty
+    if box_item.qty <= 0:
+        db.session.delete(box_item)
+
+    target_item = BoxItem.query.filter_by(
+        box_id=target_box.id, nomenclature_id=item.id
+    ).first()
+    if target_item:
+        target_item.qty += qty
+    else:
+        db.session.add(BoxItem(box_id=target_box.id, nomenclature_id=item.id, qty=qty))
+
+    source_box.mark_scanned(current_user)
+    target_box.mark_scanned(current_user)
+    db.session.commit()
+    flash(
+        f"Перенесено: {item.name} — {qty:g} {item.unit}, "
+        f"{source_box.box_number} → {target_box.box_number}",
+        "success",
+    )
+    return redirect(url_for("movement.box_transfer", source_box_number=source_box.box_number))
 
 
 @bp.route("/new", methods=["GET", "POST"])
@@ -366,12 +451,7 @@ def add_box(doc_id):
 
     conflict = _find_conflicting_movement_line(box, exclude_doc_id=doc.id)
     if conflict:
-        flash(
-            f"Короб {box.box_number} уже отсканирован в другое перемещение "
-            f"{conflict.document.number} ({_conflict_status_label(conflict.document)}) — "
-            f"сначала уберите его оттуда.",
-            "danger",
-        )
+        flash(_conflict_message(box, conflict), "danger")
         return redirect(url_for("movement.detail", doc_id=doc.id))
 
     _create_movement_line(doc, box)
@@ -641,7 +721,7 @@ def export_document(doc_id):
 
 @bp.route("/export.xlsx")
 def export_all():
-    documents = MovementDocument.query.order_by(MovementDocument.created_at.desc()).all()
+    documents = owned_query(MovementDocument).order_by(MovementDocument.created_at.desc()).all()
     data = export_movement_to_excel(documents)
     fname = f"movements_{timestamp_for_filename()}.xlsx"
     return Response(
@@ -663,7 +743,7 @@ def export_waybills():
         return redirect(url_for("movement.list_documents"))
 
     documents = (
-        MovementDocument.query.filter(MovementDocument.id.in_(doc_ids))
+        owned_query(MovementDocument).filter(MovementDocument.id.in_(doc_ids))
         .order_by(MovementDocument.created_at.desc())
         .all()
     )
@@ -693,7 +773,7 @@ def export_shipping_labels():
         return redirect(url_for("movement.list_documents"))
 
     documents = (
-        MovementDocument.query.filter(MovementDocument.id.in_(doc_ids))
+        owned_query(MovementDocument).filter(MovementDocument.id.in_(doc_ids))
         .order_by(MovementDocument.created_at.desc())
         .all()
     )

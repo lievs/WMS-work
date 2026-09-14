@@ -16,10 +16,16 @@ from ..models import (
     Warehouse,
 )
 from ..utils.excel_io import export_inventory_to_excel, timestamp_for_filename
+from ..utils.document_access import ensure_view_document_access, owned_query
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 
 bp = Blueprint("inventory", __name__)
+
+
+@bp.before_request
+def _restrict_document_access():
+    ensure_view_document_access(InventoryDocument)
 
 
 def _warehouse_stock_by_nomenclature(warehouse_id):
@@ -49,7 +55,7 @@ def _warehouse_stock_by_nomenclature(warehouse_id):
 
 @bp.route("/")
 def list_documents():
-    documents = InventoryDocument.query.order_by(InventoryDocument.created_at.desc()).all()
+    documents = owned_query(InventoryDocument).order_by(InventoryDocument.created_at.desc()).all()
     return render_template("inventory/list.html", documents=documents)
 
 
@@ -66,7 +72,7 @@ def merge_documents():
         flash("Выберите минимум два листа для объединения", "danger")
         return redirect(url_for("inventory.list_documents"))
 
-    docs = InventoryDocument.query.filter(InventoryDocument.id.in_(doc_ids)).all()
+    docs = owned_query(InventoryDocument).filter(InventoryDocument.id.in_(doc_ids)).all()
     if len(docs) != len(set(doc_ids)):
         flash("Не удалось найти все выбранные листы", "danger")
         return redirect(url_for("inventory.list_documents"))
@@ -374,7 +380,7 @@ def export_document(doc_id):
 
 @bp.route("/export.xlsx")
 def export_all():
-    documents = InventoryDocument.query.order_by(InventoryDocument.created_at.desc()).all()
+    documents = owned_query(InventoryDocument).order_by(InventoryDocument.created_at.desc()).all()
     data = export_inventory_to_excel(documents)
     fname = f"inventory_{timestamp_for_filename()}.xlsx"
     return Response(

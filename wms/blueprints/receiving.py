@@ -26,13 +26,50 @@ from ..models import (
     SupplierReturn,
     UnplacedStock,
     UnplacedStockLot,
+    Warehouse,
 )
+from ..utils.document_access import ensure_view_document_access, owned_query
 from ..utils.excel_io import export_receiving_to_excel, timestamp_for_filename
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 from ..utils.receiving_invoice_import import InvoiceParseError, parse_invoice
 
 bp = Blueprint("receiving", __name__)
+
+
+@bp.before_request
+def _restrict_document_access():
+    ensure_view_document_access(ReceivingDocument)
+
+
+def _receiving_warehouses():
+    """В приемке доступны только два физических склада."""
+    allowed_names = ("основной", "основной склад", "склад №2")
+    warehouses = (
+        Warehouse.query.filter(
+            Warehouse.is_active.is_(True),
+            func.lower(func.trim(Warehouse.name)).in_(allowed_names),
+        )
+        .order_by(Warehouse.code)
+        .all()
+    )
+    if warehouses:
+        return warehouses
+    # Обратная совместимость для старой базы, где два физических склада
+    # могли называться иначе: до переименования берем первые два по коду,
+    # но склады-городá маркетплейсов в приемку никогда не попадают.
+    return (
+        Warehouse.query.filter_by(is_active=True, marketplace=None)
+        .order_by(Warehouse.code)
+        .limit(2)
+        .all()
+    )
+
+
+def _receiving_warehouse_or_none(warehouse_id):
+    if not warehouse_id:
+        return None
+    return next((wh for wh in _receiving_warehouses() if wh.id == warehouse_id), None)
 
 
 def _next_redirect(doc_id):
@@ -54,7 +91,7 @@ def list_documents():
     unfinished_only = request.args.get("unfinished") == "on"
     invoice_only = request.args.get("invoice_only") == "on"
 
-    query = ReceivingDocument.query
+    query = owned_query(ReceivingDocument)
     if unfinished_only:
         query = query.filter(ReceivingDocument.status != "completed")
     if invoice_only:
@@ -79,6 +116,10 @@ def returns_list():
     unsynced_only = request.args.get("unsynced") == "on"
 
     query = SupplierReturn.query
+    if not current_user.is_admin:
+        query = query.join(ReceivingDocument).filter(
+            ReceivingDocument.created_by_id == current_user.id
+        )
     if unsynced_only:
         query = query.filter(SupplierReturn.synced_to_1c_at.is_(None))
 
@@ -90,17 +131,16 @@ def returns_list():
 
 @bp.route("/new", methods=["GET", "POST"])
 def new_document():
-    from ..models import Warehouse
-
     if request.method == "GET":
-        warehouses = Warehouse.query.filter_by(is_active=True).order_by(Warehouse.code).all()
+        warehouses = _receiving_warehouses()
         return render_template("receiving/new.html", warehouses=warehouses)
 
     warehouse_id = request.form.get("warehouse_id", type=int)
     supplier = request.form.get("supplier", "").strip()
 
-    if not warehouse_id:
-        flash("Выберите склад приемки", "danger")
+    warehouse = _receiving_warehouse_or_none(warehouse_id)
+    if not warehouse:
+        flash("Для приемки выберите склад «Основной» или «Склад №2»", "danger")
         return redirect(url_for("receiving.new_document"))
 
     doc = ReceivingDocument(
@@ -150,15 +190,14 @@ def import_invoice_form():
     приемки, поставщик определяется из файла (и заводится в справочник,
     если его еще нет), товары и количество подставляются из накладной.
     Дальше кладовщик сверяет их на мобильной форме (см. confirm_invoice)."""
-    from ..models import Warehouse
-
     if request.method == "GET":
-        warehouses = Warehouse.query.filter_by(is_active=True).order_by(Warehouse.code).all()
+        warehouses = _receiving_warehouses()
         return render_template("receiving/import_invoice.html", warehouses=warehouses)
 
     warehouse_id = request.form.get("warehouse_id", type=int)
-    if not warehouse_id:
-        flash("Выберите склад приемки", "danger")
+    warehouse = _receiving_warehouse_or_none(warehouse_id)
+    if not warehouse:
+        flash("Для приемки выберите склад «Основной» или «Склад №2»", "danger")
         return redirect(url_for("receiving.import_invoice_form"))
 
     file = request.files.get("file")
@@ -312,8 +351,6 @@ def confirm_line(doc_id, line_id):
 
 @bp.route("/<int:doc_id>")
 def detail(doc_id):
-    from ..models import Warehouse
-
     doc = ReceivingDocument.query.get_or_404(doc_id)
     lines = doc.lines.all()
 
@@ -332,7 +369,7 @@ def detail(doc_id):
         Box.query.filter(Box.id.in_(packed_box_ids)).all() if packed_box_ids else []
     )
 
-    warehouses = Warehouse.query.filter_by(is_active=True).order_by(Warehouse.code).all()
+    warehouses = _receiving_warehouses()
 
     return render_template(
         "receiving/detail.html",
@@ -688,9 +725,9 @@ def change_warehouse(doc_id):
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
     warehouse_id = request.form.get("warehouse_id", type=int)
-    warehouse = Warehouse.query.get(warehouse_id) if warehouse_id else None
+    warehouse = _receiving_warehouse_or_none(warehouse_id)
     if not warehouse:
-        flash("Выберите склад", "danger")
+        flash("Для приемки выберите склад «Основной» или «Склад №2»", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
     doc.warehouse_id = warehouse.id
@@ -814,30 +851,9 @@ def complete(doc_id):
                     invoice_number=doc.number if doc.is_from_invoice_import() else None,
                 )
             )
-        # Недостача — по накладной заявлено больше, чем фактически подтвердили
-        # на пересчете (line.qty поправляется прямо в строке, исходное
-        # expected_qty не трогается специально для этого сравнения). Только
-        # для строк из накладной (expected_qty есть только у них — см.
-        # import_invoice_form); вручную добавленные строки сравнивать не с
-        # чем. Как и брак, это отдельный возврат поставщику — попадет в тот
-        # же документ 1С, что и брак по этой приемке (см. _supplier_returns_export).
-        shortage = (line.expected_qty - line.qty) if line.expected_qty is not None else 0
-        if shortage > 0:
-            db.session.add(
-                SupplierReturn(
-                    warehouse_id=doc.warehouse_id,
-                    nomenclature_id=line.nomenclature_id,
-                    qty=shortage,
-                    comment=(
-                        f"Недостача при пересчете приемки {doc.number} "
-                        f"(по накладной {line.expected_qty}, принято {line.qty})"
-                    ),
-                    created_by_id=current_user.id,
-                    receiving_document_id=doc.id,
-                    supplier_name=doc.supplier,
-                    invoice_number=doc.number if doc.is_from_invoice_import() else None,
-                )
-            )
+        # Расхождение с накладной не является возвратом. Во всех статусах,
+        # кроме разбраковки, учет ведется по фактически принятому line.qty;
+        # SupplierReturn создается только из явно указанного defect_qty.
 
     doc.status = "completed"
     doc.completed_at = datetime.utcnow()

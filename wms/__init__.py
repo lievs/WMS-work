@@ -97,6 +97,15 @@ def _ensure_columns():
                             )
                         )
                     print("[schema] users.nomenclature_edit_allowed заполнен для уже существующих пользователей")
+                if table.name == "users" and column.name == "warehouse_mapping_allowed":
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET warehouse_mapping_allowed = 0 "
+                                "WHERE warehouse_mapping_allowed IS NULL"
+                            )
+                        )
+                    print("[schema] users.warehouse_mapping_allowed заполнен для уже существующих пользователей")
             except Exception as exc:  # noqa: BLE001
                 print(f"[schema] Не удалось добавить {table.name}.{column.name}: {exc}")
 

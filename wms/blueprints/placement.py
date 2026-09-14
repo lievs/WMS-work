@@ -23,15 +23,20 @@ from ..models import (
     Nomenclature,
     PlacementDocument,
     PlacementLine,
-    SupplierReturn,
     UnplacedStock,
     Warehouse,
 )
 from ..utils.excel_io import export_placement_to_excel, timestamp_for_filename
+from ..utils.document_access import ensure_view_document_access, owned_query
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 
 bp = Blueprint("placement", __name__)
+
+
+@bp.before_request
+def _restrict_document_access():
+    ensure_view_document_access(PlacementDocument)
 
 
 def suggest_cell(warehouse_id, box):
@@ -101,7 +106,7 @@ def suggest_cell(warehouse_id, box):
 
 @bp.route("/")
 def list_documents():
-    documents = PlacementDocument.query.order_by(PlacementDocument.created_at.desc()).all()
+    documents = owned_query(PlacementDocument).order_by(PlacementDocument.created_at.desc()).all()
 
     stock_rows = (
         db.session.query(UnplacedStock)
@@ -117,47 +122,19 @@ def list_documents():
         .all()
     )
     cell_suggestions = {box.id: suggest_cell(box.warehouse_id, box) for box in open_boxes}
-    returns = SupplierReturn.query.order_by(SupplierReturn.created_at.desc()).limit(20).all()
     return render_template(
         "placement/list.html",
         documents=documents,
         stock_rows=stock_rows,
         open_boxes=open_boxes,
         cell_suggestions=cell_suggestions,
-        returns=returns,
     )
 
 
 @bp.route("/write-off-stock", methods=["POST"])
 def write_off_stock():
-    """Списание брака с неразмещенного остатка через возврат поставщику.
-    Сам документ возврата оформляется в 1С отдельно — здесь только
-    списываем количество со склада и фиксируем его для сверки."""
-    warehouse_id = request.form.get("warehouse_id", type=int)
-    nomenclature_id = request.form.get("nomenclature_id", type=int)
-    qty = request.form.get("qty", type=float)
-    item = Nomenclature.query.get_or_404(nomenclature_id)
-
-    available = UnplacedStock.available(warehouse_id, nomenclature_id)
-    if not qty or qty <= 0 or qty > available:
-        flash(
-            f"Недостаточно неразмещенного остатка «{item.name}»: доступно {available} {item.unit}",
-            "danger",
-        )
-        return redirect(url_for("placement.list_documents"))
-
-    UnplacedStock.consume(warehouse_id, nomenclature_id, qty)
-
-    db.session.add(
-        SupplierReturn(
-            warehouse_id=warehouse_id,
-            nomenclature_id=nomenclature_id,
-            qty=qty,
-            created_by_id=current_user.id,
-        )
-    )
-    db.session.commit()
-    flash(f"Списано {qty} {item.unit} «{item.name}» — возврат поставщику", "success")
+    """Старый адрес оставлен безопасным: возврат создается только в приемке."""
+    flash("Возврат поставщику доступен только на этапе разбраковки приемки", "danger")
     return redirect(url_for("placement.list_documents"))
 
 

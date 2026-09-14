@@ -60,19 +60,11 @@ def users():
     all_users = User.query.order_by(User.username).all()
     warehouses = Warehouse.query.order_by(Warehouse.code).all()
 
-    # Склад 1С настраивается отдельно на каждый склад-город маркетплейса
-    # (не по городу целиком) — одна и та же площадка одного города может
-    # возить на разные склады 1С в зависимости от маркетплейса (например,
-    # ВБ Краснодар едет на СЦ, а ОЗОН Краснодар — на фулфилмент), см.
-    # warehouses.update_fulfillment_1c_name.
-    fulfillment_warehouses = [wh for wh in warehouses if wh.marketplace is not None]
-
     return render_template(
         "auth/users.html",
         users=all_users,
         sections=SECTIONS,
         warehouses=warehouses,
-        fulfillment_warehouses=fulfillment_warehouses,
         shipping_label_sender=get_shipping_label_sender_override(),
     )
 
@@ -184,6 +176,7 @@ def update_sections(user_id):
     # редактирование номенклатуры и при "полном доступе ко всем разделам"
     # (просмотр номенклатуры при этом остается).
     user.nomenclature_edit_allowed = request.form.get("nomenclature_edit") == "on"
+    user.warehouse_mapping_allowed = request.form.get("warehouse_mapping") == "on"
     db.session.commit()
     flash(f"Доступ к разделам для «{user.username}» обновлен", "success")
     return redirect(url_for("auth.users"))

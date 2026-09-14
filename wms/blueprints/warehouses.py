@@ -75,7 +75,12 @@ def list_warehouses():
     warehouses = Warehouse.query.order_by(Warehouse.code).all()
     for wh in warehouses:
         wh.in_current_plan = wh.marketplace is None or wh.id in active_city_warehouse_ids
-    return render_template("warehouses/list.html", warehouses=warehouses)
+    fulfillment_warehouses = [wh for wh in warehouses if wh.marketplace is not None]
+    return render_template(
+        "warehouses/list.html",
+        warehouses=warehouses,
+        fulfillment_warehouses=fulfillment_warehouses,
+    )
 
 
 @bp.route("/create", methods=["POST"])
@@ -129,9 +134,9 @@ def update_fulfillment_1c_name(warehouse_id):
     сразу на оба маркетплейса города не подходит — настраивается отдельно
     на каждый склад, как и получатель на стикерах (см. update_recipient).
     См. Warehouse.fulfillment_1c_name и integration_1c._to_warehouse_name_for_1c."""
-    if not current_user.is_admin:
-        flash("Настраивать склад 1С может только администратор", "danger")
-        return redirect(url_for("auth.users"))
+    if not current_user.can_manage_warehouse_mapping():
+        flash("У вас нет права на сопоставление складов с 1С", "danger")
+        return redirect(url_for("warehouses.list_warehouses"))
 
     wh = Warehouse.query.get_or_404(warehouse_id)
     wh.fulfillment_1c_name = request.form.get("fulfillment_1c_name", "").strip() or None
@@ -140,7 +145,7 @@ def update_fulfillment_1c_name(warehouse_id):
         flash(f"Склад 1С для «{wh.name}» обновлен: «{wh.fulfillment_1c_name}»", "success")
     else:
         flash(f"Склад 1С для «{wh.name}» очищен — будет использован общий запасной склад", "success")
-    return redirect(url_for("auth.users"))
+    return redirect(url_for("warehouses.list_warehouses"))
 
 
 @bp.route("/<int:warehouse_id>/cells")

@@ -29,7 +29,17 @@
   {% if route_box_number %}
     {% if route_not_found %}
       <div class="alert alert-danger mt-3 mb-0">Короб «{{ route_box_number }}» не найден.</div>
-    {% elif route_box and not routing %}
+    {% elif route_box %}
+      <div class="mt-3">
+        <b>Содержимое короба:</b>
+        {% for it in route_box.items %}
+          <div>{{ it.nomenclature.name }} — {{ it.qty }} {{ it.nomenclature.unit }}</div>
+        {% else %}
+          <div class="text-muted">короб пуст</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    {% if route_box and not routing %}
       <div class="alert alert-secondary mt-3 mb-0">
         <b>Пропускаем.</b> Короб {{ route_box.box_number }}{% if route_box.items.count() == 0 %} пуст —{% else %} —{% endif %}
         потребности по его содержимому нет ни на одном складе-городе по текущему плану отгрузок.
@@ -54,16 +64,6 @@
           {% endfor %}
           </tbody>
         </table>
-      </div>
-    {% endif %}
-    {% if route_box %}
-      <div class="mt-3">
-        <b>Содержимое короба:</b>
-        {% for it in route_box.items %}
-          <div>{{ it.nomenclature.name }} — {{ it.qty }} {{ it.nomenclature.unit }}</div>
-        {% else %}
-          <div class="text-muted">короб пуст</div>
-        {% endfor %}
       </div>
     {% endif %}
   {% endif %}

@@ -214,6 +214,74 @@ def reset_password(user_id):
     return redirect(url_for("auth.users"))
 
 
+@bp.route("/users/<int:user_id>/set-password", methods=["POST"])
+@login_required
+def set_password(user_id):
+    """В отличие от reset_password (случайный временный пароль), здесь
+    администратор задает пароль сам — например, чтобы сразу сообщить
+    пользователю знакомый ему пароль."""
+    if not _require_admin():
+        return redirect(url_for("main.index"))
+
+    user = User.query.get_or_404(user_id)
+    new_password = request.form.get("password", "")
+    if len(new_password) < 4:
+        flash("Пароль слишком короткий (минимум 4 символа)", "danger")
+        return redirect(url_for("auth.users"))
+
+    user.set_password(new_password)
+    db.session.commit()
+    flash(f"Пароль для «{user.username}» изменен", "success")
+    return redirect(url_for("auth.users"))
+
+
+@bp.route("/users/<int:user_id>/username", methods=["POST"])
+@login_required
+def update_username(user_id):
+    if not _require_admin():
+        return redirect(url_for("main.index"))
+
+    user = User.query.get_or_404(user_id)
+    new_username = request.form.get("username", "").strip()
+    if not new_username:
+        flash("Укажите логин", "danger")
+        return redirect(url_for("auth.users"))
+
+    if User.query.filter(User.username == new_username, User.id != user.id).first():
+        flash(f"Логин «{new_username}» уже занят", "danger")
+        return redirect(url_for("auth.users"))
+
+    old_username = user.username
+    user.username = new_username
+    db.session.commit()
+    flash(f"Логин «{old_username}» изменен на «{new_username}»", "success")
+    return redirect(url_for("auth.users"))
+
+
+@bp.route("/users/<int:user_id>/delete", methods=["POST"])
+@login_required
+def delete_user(user_id):
+    """Удаляет пользователя целиком (не путать с toggle_user — тем
+    отключают вход, оставляя историю документов при авторе). В документах,
+    где этот пользователь был автором, поле "Автор" после удаления просто
+    станет пустым — сами документы никуда не деваются (created_by_id везде
+    nullable и во всех шаблонах отображается через "{% if doc.created_by %}",
+    без него не отображается)."""
+    if not _require_admin():
+        return redirect(url_for("main.index"))
+
+    user = User.query.get_or_404(user_id)
+    if user.id == current_user.id:
+        flash("Нельзя удалить самого себя", "danger")
+        return redirect(url_for("auth.users"))
+
+    username = user.username
+    db.session.delete(user)
+    db.session.commit()
+    flash(f"Пользователь «{username}» удален", "success")
+    return redirect(url_for("auth.users"))
+
+
 @bp.route("/users/<int:user_id>/revoke-sessions", methods=["POST"])
 @login_required
 def revoke_sessions(user_id):

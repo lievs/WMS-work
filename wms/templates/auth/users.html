@@ -45,7 +45,12 @@
         <tbody>
         {% for u in users %}
           <tr>
-            <td>{{ u.username }}</td>
+            <td style="min-width:140px">
+              <form method="post" action="{{ url_for('auth.update_username', user_id=u.id) }}" class="d-flex gap-1">
+                <input type="text" name="username" value="{{ u.username }}" class="form-control form-control-sm" required>
+                <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
+              </form>
+            </td>
             <td>{{ u.full_name or '' }}</td>
             <td>{% if u.is_admin %}<span class="badge bg-primary">Админ</span>{% else %}Сотрудник{% endif %}</td>
             <td>
@@ -139,6 +144,10 @@
               <form method="post" action="{{ url_for('auth.reset_password', user_id=u.id) }}" class="d-inline">
                 <button type="submit" class="btn btn-sm btn-outline-secondary">Сбросить пароль</button>
               </form>
+              <form method="post" action="{{ url_for('auth.set_password', user_id=u.id) }}" class="d-inline-flex gap-1 align-items-center">
+                <input type="text" name="password" class="form-control form-control-sm" style="width:110px" placeholder="Новый пароль" minlength="4" required>
+                <button type="submit" class="btn btn-sm btn-outline-secondary">Установить</button>
+              </form>
               <form method="post" action="{{ url_for('auth.revoke_sessions', user_id=u.id) }}" class="d-inline"
                     onsubmit="return confirm('{{ 'Завершить все сессии на других устройствах?' if u.id == current_user.id else 'Завершить все активные сессии пользователя?' }}');">
                 <button type="submit" class="btn btn-sm btn-outline-warning">
@@ -148,6 +157,10 @@
               {% if u.id != current_user.id %}
               <form method="post" action="{{ url_for('auth.toggle_user', user_id=u.id) }}" class="d-inline">
                 <button type="submit" class="btn btn-sm btn-outline-secondary">{{ 'Отключить' if u.is_active_user else 'Включить' }}</button>
+              </form>
+              <form method="post" action="{{ url_for('auth.delete_user', user_id=u.id) }}" class="d-inline"
+                    onsubmit="return confirm('Удалить пользователя «{{ u.username }}» насовсем? В его документах поле «Автор» станет пустым, сами документы останутся.');">
+                <button type="submit" class="btn btn-sm btn-outline-danger">Удалить</button>
               </form>
               {% endif %}
             </td>

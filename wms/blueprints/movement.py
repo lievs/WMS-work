@@ -514,6 +514,20 @@ def _revert_shipment_fulfillment(box, warehouse_id):
             plan_line.fulfilled_qty = max(plan_line.fulfilled_qty - item.qty, 0)
 
 
+def _revert_line_effects(doc, line):
+    """Отменяет эффект complete()/receive() именно для этого короба —
+    возвращает его туда, где он был до перемещения, и снимает выполнение
+    плана отгрузок, если оно уже было засчитано. Используется и при
+    удалении одной строки, и при удалении завершенного документа целиком
+    (см. delete_line, delete_document)."""
+    box = line.box
+    if doc.received_at is not None:
+        _revert_shipment_fulfillment(box, doc.to_warehouse_id)
+    box.warehouse_id = line.from_warehouse_id
+    box.cell_id = line.from_cell_id
+    box.status = "stored" if line.from_cell_id else "open"
+
+
 @bp.route("/<int:doc_id>/boxes/add", methods=["POST"])
 def add_box(doc_id):
     doc = MovementDocument.query.get_or_404(doc_id)
@@ -581,15 +595,7 @@ def delete_line(doc_id, line_id):
     line = MovementLine.query.filter_by(id=line_id, document_id=doc_id).first_or_404()
 
     if editing_after_completion:
-        # Отменяем эффект complete()/receive() именно для этого короба —
-        # возвращаем его туда, где он был до перемещения, и снимаем
-        # выполнение плана отгрузок, если оно уже было засчитано.
-        box = line.box
-        if doc.received_at is not None:
-            _revert_shipment_fulfillment(box, doc.to_warehouse_id)
-        box.warehouse_id = line.from_warehouse_id
-        box.cell_id = line.from_cell_id
-        box.status = "stored" if line.from_cell_id else "open"
+        _revert_line_effects(doc, line)
 
     db.session.delete(line)
     db.session.commit()
@@ -650,9 +656,24 @@ def delete_document(doc_id):
         return redirect(url_for("movement.detail", doc_id=doc_id))
 
     doc = MovementDocument.query.get_or_404(doc_id)
-    if doc.status != "draft":
-        flash("Можно удалить только черновик — завершенный документ уже переместил короба", "danger")
-        return redirect(url_for("movement.detail", doc_id=doc_id))
+
+    if doc.status == "completed":
+        # Завершенный документ уже физически переместил короба — при
+        # удалении возвращаем их туда, где они были до перемещения (та же
+        # логика, что и при удалении отдельной строки завершенного
+        # документа, см. delete_line), иначе короба останутся числиться
+        # на складе назначения без какого-либо документа-основания.
+        for line in doc.lines:
+            _revert_line_effects(doc, line)
+
+    for source in doc.merged_from:
+        # Удаляем итоговый документ объединения — исходные документы не
+        # должны остаться со ссылкой на несуществующий; их содержимое уже
+        # уехало в удаляемый документ и вместе с ним пропадает, поэтому
+        # возвращаем их в обычные (пустые) черновики, а не оставляем
+        # висеть в статусе "merged" без цели.
+        source.merged_into_id = None
+        source.status = "draft"
 
     number = doc.number
     db.session.delete(doc)

@@ -6,7 +6,10 @@
 <div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
   <div>
     <h3 class="mb-1">Перемещение {{ doc.number }}
-      <span class="badge badge-status-{{ doc.status }}">{{ 'Черновик' if doc.status == 'draft' else 'Завершен' }}</span>
+      <span class="badge badge-status-{{ doc.status }}">{{ {'draft': 'Черновик', 'completed': 'Завершен', 'merged': 'Объединен'}.get(doc.status, doc.status) }}</span>
+      {% if doc.status == 'merged' and doc.merged_into %}
+      <a href="{{ url_for('movement.detail', doc_id=doc.merged_into.id) }}">→ {{ doc.merged_into.number }}</a>
+      {% endif %}
     </h3>
     <div class="text-muted">{{ doc.from_warehouse.name }} → {{ doc.to_warehouse.name }}{% if doc.created_by %} · Автор: {{ doc.created_by.display_name() }}{% endif %}</div>
   </div>
@@ -16,18 +19,19 @@
     <form method="post" action="{{ url_for('movement.complete', doc_id=doc.id) }}" class="d-inline">
       <button type="submit" class="btn btn-success">✅ Завершить перемещение</button>
     </form>
-    {% elif not doc.received_at %}
+    {% elif doc.status == 'completed' and not doc.received_at %}
     <form method="post" action="{{ url_for('movement.receive', doc_id=doc.id) }}" class="d-inline">
       <button type="submit" class="btn btn-warning" title="До этой кнопки товар считается «в пути» и не засчитывается в план отгрузок">📥 Принято на складе</button>
     </form>
     <a class="btn btn-outline-warning" href="{{ url_for('movement.receive_with_discrepancy', doc_id=doc.id) }}"
        title="Если на месте приняли не столько, сколько отправили — недостача или излишек">⚠️ Принято с расхождением</a>
-    {% else %}
+    {% elif doc.status == 'completed' %}
     <span class="badge bg-success">Принято на складе {{ (doc.received_at|msk).strftime('%d.%m.%Y %H:%M') }}</span>
     {% if doc.discrepancies %}<span class="badge bg-warning text-dark">С расхождением</span>{% endif %}
     {% endif %}
-    {% if doc.status == 'draft' and current_user.is_admin %}
-    <form method="post" action="{{ url_for('movement.delete_document', doc_id=doc.id) }}" class="d-inline" onsubmit="return confirm('Удалить список перемещения {{ doc.number }} целиком? Действие необратимо.');">
+    {% if current_user.is_admin %}
+    <form method="post" action="{{ url_for('movement.delete_document', doc_id=doc.id) }}" class="d-inline"
+          onsubmit="return confirm('Удалить список перемещения {{ doc.number }} целиком? Действие необратимо.{% if doc.status == 'completed' %} Короба будут возвращены туда, где были до перемещения.{% endif %}');">
       <button type="submit" class="btn btn-outline-danger">🗑 Удалить документ</button>
     </form>
     {% endif %}

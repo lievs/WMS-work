@@ -131,6 +131,80 @@ def list_documents():
     )
 
 
+@bp.route("/merge", methods=["POST"])
+def merge_documents():
+    """Свести несколько параллельных черновиков на один и тот же маршрут
+    (например, несколько сотрудников собирали одно направление порознь и в
+    итоге получили разные документы вместо одного) в один итоговый —
+    короба (MovementLine) переезжают в новый документ без задвоения, старые
+    помечаются "merged" и остаются в истории — ничего не удаляется. Только
+    для админа: объединение задним числом может незаметно перемешать
+    короба, собранные разными людьми, это должен делать кто-то, кто видит
+    всю картину."""
+    if not current_user.is_admin:
+        flash("Объединять перемещения может только администратор", "danger")
+        return redirect(url_for("movement.list_documents"))
+
+    doc_ids = request.form.getlist("doc_ids", type=int)
+    if len(doc_ids) < 2:
+        flash("Выберите минимум два документа для объединения", "danger")
+        return redirect(url_for("movement.list_documents"))
+
+    docs = MovementDocument.query.filter(MovementDocument.id.in_(doc_ids)).all()
+    if len(docs) != len(set(doc_ids)):
+        flash("Не удалось найти все выбранные документы", "danger")
+        return redirect(url_for("movement.list_documents"))
+    if any(d.status != "draft" for d in docs):
+        flash("Объединять можно только черновики (не завершенные и не уже объединенные документы)", "danger")
+        return redirect(url_for("movement.list_documents"))
+    from_ids = {d.from_warehouse_id for d in docs}
+    to_ids = {d.to_warehouse_id for d in docs}
+    if len(from_ids) > 1 or len(to_ids) > 1:
+        flash(
+            "Выбранные документы ведут на разные маршруты — объединять можно только "
+            "документы с одинаковым складом-отправителем и складом назначения",
+            "danger",
+        )
+        return redirect(url_for("movement.list_documents"))
+
+    merged = MovementDocument(
+        number=next_number("movement"),
+        from_warehouse_id=from_ids.pop(),
+        to_warehouse_id=to_ids.pop(),
+        created_by_id=current_user.id,
+    )
+    db.session.add(merged)
+    db.session.flush()
+
+    seen_box_ids = set()
+    duplicate_box_numbers = []
+    moved_count = 0
+    for doc in docs:
+        for line in doc.lines.all():
+            if line.box_id in seen_box_ids:
+                duplicate_box_numbers.append(line.box.box_number)
+                db.session.delete(line)
+                continue
+            seen_box_ids.add(line.box_id)
+            line.document_id = merged.id
+            moved_count += 1
+        doc.status = "merged"
+        doc.merged_into_id = merged.id
+
+    db.session.commit()
+
+    message = f"Документы объединены в {merged.number}: {moved_count} короб(ов) из {len(docs)} документов"
+    if duplicate_box_numbers:
+        flash(
+            message + f". Внимание: короб(а) {', '.join(duplicate_box_numbers)} "
+            "были в нескольких документах — учтены один раз",
+            "warning",
+        )
+    else:
+        flash(message, "success")
+    return redirect(url_for("movement.detail", doc_id=merged.id))
+
+
 @bp.route("/route-box")
 def route_box():
     """Сканируем короб — показываем, на какой склад-город его нужно
@@ -306,6 +380,23 @@ def new_document():
     if from_warehouse_id == to_warehouse_id:
         flash("Склад-отправитель и склад назначения не могут совпадать", "danger")
         return redirect(url_for("movement.new_document"))
+
+    # Если черновик на этот же маршрут (тот же склад-отправитель и склад
+    # назначения) уже кто-то начал собирать — присоединяемся к нему вместо
+    # создания дубля, точно так же, как это уже работает при добавлении
+    # короба через "Куда везти короб" (см. route_box_add). Иначе двое
+    # сотрудников, собирающих одно направление независимо друг от друга,
+    # получали бы два отдельных документа вместо одного.
+    doc = (
+        MovementDocument.query.filter_by(
+            from_warehouse_id=from_warehouse_id, to_warehouse_id=to_warehouse_id, status="draft"
+        )
+        .order_by(MovementDocument.created_at.desc())
+        .first()
+    )
+    if doc:
+        flash(f"На этот маршрут уже есть черновик {doc.number} — продолжайте собирать в него", "info")
+        return redirect(url_for("movement.detail", doc_id=doc.id))
 
     doc = MovementDocument(
         number=next_number("movement"),
@@ -623,6 +714,20 @@ def toggle_accounting(doc_id):
     выгрузкой (см. MovementDocument.accounting_entered_at)."""
     doc = MovementDocument.query.get_or_404(doc_id)
     doc.accounting_entered_at = None if doc.accounting_entered_at else datetime.utcnow()
+    db.session.commit()
+    return redirect(url_for("movement.list_documents"))
+
+
+@bp.route("/<int:doc_id>/toggle-marketplace-request", methods=["POST"])
+def toggle_marketplace_request(doc_id):
+    """Ручная отметка "заявка на МП создана" — так же как toggle_accounting,
+    просто галочка для контроля (синяя в списке, в отличие от зеленой "1С"),
+    независима и от выгрузки в 1С, и от самого статуса перемещения (см.
+    MovementDocument.marketplace_request_created_at)."""
+    doc = MovementDocument.query.get_or_404(doc_id)
+    doc.marketplace_request_created_at = (
+        None if doc.marketplace_request_created_at else datetime.utcnow()
+    )
     db.session.commit()
     return redirect(url_for("movement.list_documents"))
 

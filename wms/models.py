@@ -683,7 +683,7 @@ class MovementDocument(db.Model):
     number = db.Column(db.String(30), unique=True, nullable=False)
     from_warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False)
     to_warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False, index=True)
-    status = db.Column(db.String(20), nullable=False, default="draft")  # draft | completed
+    status = db.Column(db.String(20), nullable=False, default="draft")  # draft | completed | merged
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime)
@@ -711,10 +711,23 @@ class MovementDocument(db.Model):
     # 1С предупреждений, показывается значком "!" в списке перемещений.
     # NULL — документ выгрузился полностью, без пропусков.
     sync_warning = db.Column(db.Text, nullable=True)
+    # Заполняется, когда несколько параллельных черновиков на один и тот же
+    # маршрут (тот же склад-отправитель и склад назначения — например,
+    # несколько сотрудников собирали одно направление порознь) свели в один
+    # итоговый документ — см. movement.merge_documents. Статус такого
+    # документа становится "merged", его короба (MovementLine) переезжают
+    # в итоговый документ, здесь остается только ссылка на него для истории.
+    merged_into_id = db.Column(db.Integer, db.ForeignKey("movement_documents.id"), nullable=True)
+    # Отметка "заявка на маркетплейс создана" — ручная галочка (см.
+    # movement.toggle_marketplace_request), синего цвета в списке в отличие
+    # от зеленой "1С" — независима от нее и от самой отправки, для
+    # отдельного контроля за заявкой на приемку на стороне маркетплейса.
+    marketplace_request_created_at = db.Column(db.DateTime, nullable=True)
 
     from_warehouse = db.relationship("Warehouse", foreign_keys=[from_warehouse_id])
     to_warehouse = db.relationship("Warehouse", foreign_keys=[to_warehouse_id])
     created_by = db.relationship("User")
+    merged_into = db.relationship("MovementDocument", remote_side=[id], backref="merged_from")
     lines = db.relationship(
         "MovementLine", backref="document", lazy="dynamic", cascade="all, delete-orphan"
     )

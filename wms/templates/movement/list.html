@@ -119,16 +119,21 @@
         <label class="form-check-label" for="selectAllDocs">Выбрать все</label>
       </div>
       <div class="d-flex gap-2">
+        {% if current_user.is_admin %}
+        <button type="submit" formaction="{{ url_for('movement.merge_documents') }}" class="btn btn-outline-secondary btn-sm" id="mergeDocsBtn" disabled
+                onclick="return confirm('Объединить выбранные черновики в один документ? Короба переедут в новый документ, старые останутся в истории со статусом «Объединен».');">🔀 Объединить выбранные (<span id="selectedDocsCount3">0</span>)</button>
+        {% endif %}
         <button type="submit" formaction="{{ url_for('movement.export_shipping_labels') }}" class="btn btn-outline-secondary btn-sm" id="printLabelsBtn" disabled>🏷️ Стикеры на короба (<span id="selectedDocsCount2">0</span>)</button>
         <button type="submit" class="btn btn-outline-secondary btn-sm" id="printWaybillsBtn" disabled>🖨️ Печать накладных по выбранным (<span id="selectedDocsCount">0</span>)</button>
       </div>
     </div>
+    {% set status_labels = {'draft': 'Черновик', 'completed': 'Завершен', 'merged': 'Объединен'} %}
     <table class="table">
-      <thead><tr><th></th><th>Номер</th><th>Дата</th><th>Откуда</th><th>Куда</th><th>Коробов</th><th>Кол-во товара</th><th>Автор</th><th>Статус</th><th>Приемка</th><th class="text-center">1С</th><th></th></tr></thead>
+      <thead><tr><th></th><th>Номер</th><th>Дата</th><th>Откуда</th><th>Куда</th><th>Коробов</th><th>Кол-во товара</th><th>Автор</th><th>Статус</th><th>Приемка</th><th class="text-center">1С</th><th class="text-center">Заявка на МП</th><th></th></tr></thead>
       <tbody>
       {% for d in documents %}
         <tr>
-          <td><input type="checkbox" class="form-check-input doc-checkbox" name="doc_ids" value="{{ d.id }}"></td>
+          <td><input type="checkbox" class="form-check-input doc-checkbox" data-status="{{ d.status }}" name="doc_ids" value="{{ d.id }}"></td>
           <td>
             <a href="{{ url_for('movement.detail', doc_id=d.id) }}">{{ d.number }}</a>
             {% if d.sync_warning %}
@@ -142,7 +147,12 @@
           {% set tq = d.total_item_qty() %}
           <td>{{ tq | int if tq == tq | int else tq | round(3) }}</td>
           <td>{{ d.created_by.display_name() if d.created_by else '' }}</td>
-          <td><span class="badge badge-status-{{ d.status }}">{{ 'Черновик' if d.status == 'draft' else 'Завершен' }}</span></td>
+          <td>
+            <span class="badge badge-status-{{ d.status }}">{{ status_labels.get(d.status, d.status) }}</span>
+            {% if d.status == 'merged' and d.merged_into %}
+              <br><a class="small" href="{{ url_for('movement.detail', doc_id=d.merged_into_id) }}">→ {{ d.merged_into.number }}</a>
+            {% endif %}
+          </td>
           <td class="text-nowrap">
             {% if d.status != 'completed' %}
               <span class="text-muted">—</span>
@@ -160,13 +170,18 @@
                   title="{{ 'Внесено в 1С бухгалтерией ' + (d.accounting_entered_at|msk).strftime('%d.%m.%Y %H:%M') if d.accounting_entered_at else 'Отметить: бухгалтерия внесла документ в 1С' }}"
                   class="btn btn-sm btn-link p-0" style="font-size:1.15rem; line-height:1; text-decoration:none;">{{ '✅' if d.accounting_entered_at else '☐' }}</button>
           </td>
+          <td class="text-center">
+            <button type="submit" formmethod="post" formaction="{{ url_for('movement.toggle_marketplace_request', doc_id=d.id) }}"
+                  title="{{ 'Заявка на МП создана ' + (d.marketplace_request_created_at|msk).strftime('%d.%m.%Y %H:%M') if d.marketplace_request_created_at else 'Отметить: заявка на маркетплейс создана' }}"
+                  class="btn btn-sm btn-link p-0 text-primary" style="font-size:1.15rem; line-height:1; text-decoration:none;">{{ '✔' if d.marketplace_request_created_at else '☐' }}</button>
+          </td>
           <td>
             <a href="{{ url_for('movement.detail', doc_id=d.id) }}">Открыть</a>
             · <a href="{{ url_for('movement.export_document', doc_id=d.id) }}">Excel</a>
           </td>
         </tr>
       {% else %}
-        <tr><td colspan="12" class="text-muted">Перемещений еще нет</td></tr>
+        <tr><td colspan="13" class="text-muted">Перемещений еще нет</td></tr>
       {% endfor %}
       </tbody>
     </table>
@@ -179,7 +194,7 @@
       <a href="{{ url_for('movement.detail', doc_id=d.id) }}" class="list-group-item list-group-item-action py-2 px-2 text-decoration-none text-body">
         <div class="d-flex justify-content-between align-items-center gap-2">
           <span class="fw-bold">{{ d.number }}</span>
-          <span class="badge badge-status-{{ d.status }}">{{ 'Черновик' if d.status == 'draft' else 'Завершен' }}</span>
+          <span class="badge badge-status-{{ d.status }}">{{ status_labels.get(d.status, d.status) }}</span>
         </div>
         <div class="small text-muted">{{ d.from_warehouse.name }} → {{ d.to_warehouse.name }}</div>
         <div class="small text-muted">{{ (d.created_at|msk).strftime('%d.%m.%Y') }} · {{ d.lines.count() }} короб.</div>
@@ -218,16 +233,22 @@
   }
 
   // Печать накладных доступна только когда выбран хотя бы один документ;
-  // "Выбрать все" отмечает/снимает все флажки разом.
+  // "Выбрать все" отмечает/снимает все флажки разом. Объединение — только
+  // когда выбрано минимум два документа и ВСЕ они черновики (иначе сервер
+  // все равно откажет — здесь просто чтобы не тыкаться в заведомо
+  // невалидную кнопку).
   const selectAllDocs = document.getElementById("selectAllDocs");
   const docCheckboxes = Array.from(document.querySelectorAll(".doc-checkbox"));
   const printWaybillsBtn = document.getElementById("printWaybillsBtn");
   const printLabelsBtn = document.getElementById("printLabelsBtn");
+  const mergeDocsBtn = document.getElementById("mergeDocsBtn");
   const selectedDocsCount = document.getElementById("selectedDocsCount");
   const selectedDocsCount2 = document.getElementById("selectedDocsCount2");
+  const selectedDocsCount3 = document.getElementById("selectedDocsCount3");
 
   function updatePrintButtonState() {
-    const checkedCount = docCheckboxes.filter((cb) => cb.checked).length;
+    const checked = docCheckboxes.filter((cb) => cb.checked);
+    const checkedCount = checked.length;
     [printWaybillsBtn, printLabelsBtn].forEach((btn) => {
       btn.disabled = checkedCount === 0;
       btn.classList.toggle("btn-outline-secondary", checkedCount === 0);
@@ -235,6 +256,13 @@
     });
     selectedDocsCount.textContent = checkedCount;
     selectedDocsCount2.textContent = checkedCount;
+    if (mergeDocsBtn) {
+      const allDrafts = checked.every((cb) => cb.dataset.status === "draft");
+      mergeDocsBtn.disabled = checkedCount < 2 || !allDrafts;
+      mergeDocsBtn.classList.toggle("btn-outline-secondary", mergeDocsBtn.disabled);
+      mergeDocsBtn.classList.toggle("btn-primary", !mergeDocsBtn.disabled);
+      selectedDocsCount3.textContent = checkedCount;
+    }
   }
 
   if (selectAllDocs) {

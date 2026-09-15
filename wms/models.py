@@ -105,6 +105,18 @@ class User(UserMixin, db.Model):
     # (см. _ensure_columns: у уже существующих пользователей после
     # миграции тоже принудительно выставляется True, а не NULL).
     nomenclature_edit_allowed = db.Column(db.Boolean, nullable=False, default=True)
+    # Отдельное право на редактирование соответствия складов WMS складам
+    # 1С. Сама страница складов доступна по allowed_sections, а эта галочка
+    # разрешает только чувствительную интеграционную настройку.
+    warehouse_mapping_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Право видеть все приемки, созданные из накладных. Используется для
+    # приемщиков и заведующих складом; ручные приемки других сотрудников
+    # этот флаг не открывает.
+    invoice_receiving_view_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Версия входа используется для принудительного завершения сессий.
+    # Она записывается в cookie при авторизации; увеличение значения делает
+    # все ранее выданные cookie пользователя недействительными.
+    session_version = db.Column(db.Integer, nullable=False, default=0)
 
     def is_production_only(self):
         return self.role == "production" and not self.is_admin
@@ -122,6 +134,12 @@ class User(UserMixin, db.Model):
         # (ALTER TABLE ADD COLUMN не проставляет DEFAULT задним числом),
         # трактуем это как "не запрещено", а не как "запрещено".
         return self.is_admin or self.nomenclature_edit_allowed is not False
+
+    def can_manage_warehouse_mapping(self):
+        return self.is_admin or self.warehouse_mapping_allowed is True
+
+    def can_view_invoice_receivings(self):
+        return self.is_admin or self.invoice_receiving_view_allowed is True
 
     def has_section_access(self, section):
         """Раздел не из SECTIONS (например, служебные api/boxes/labels) не
@@ -619,6 +637,10 @@ class ReceivingLine(db.Model):
     # короб при приемке (box_id заполнен), разбраковка не применяется —
     # остается 0.
     defect_qty = db.Column(db.Float, nullable=False, default=0)
+    # Один токен соответствует одному нажатию «Добавить». Повторная
+    # отправка той же формы (двойной клик/зависший интернет) находит уже
+    # созданную строку и не проводит приемку второй раз.
+    request_token = db.Column(db.String(64), nullable=True)
 
     nomenclature = db.relationship("Nomenclature")
     box = db.relationship("Box")
@@ -952,13 +974,10 @@ class ShipmentPlanLine(db.Model):
 
 
 class SupplierReturn(db.Model):
-    """Возврат поставщику — списание брака. Два источника:
-    1) ручное списание с общего неразмещенного остатка (placement.write_off_stock)
-       — receiving_document_id пуст, к конкретной накладной не привязан,
-       синхронизации с 1С не подлежит (нечем сопоставить документ поступления);
-    2) разбраковка конкретной приемки (receiving.complete, после этапов
-       "Пересчет"/"Разбраковка") — receiving_document_id заполнен, есть с
-       каким поставщиком/накладной сверяться, попадает в /api/export для 1С.
+    """Возврат поставщику — брак, выделенный только на этапе разбраковки
+    конкретной приемки. receiving_document_id связывает возврат с накладной
+    и поставщиком для последующей выгрузки в 1С. Старые записи, созданные до
+    введения этого правила, могут не иметь receiving_document_id.
     supplier_name/invoice_number — снимок на момент создания (как у
     UnplacedStockLot), чтобы отображение не менялось задним числом."""
 

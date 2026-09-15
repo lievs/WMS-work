@@ -34,7 +34,7 @@
   </form>
   {% elif doc.status == 'sorting' %}
   <form method="post" action="{{ url_for('receiving.complete', doc_id=doc.id) }}"
-        onsubmit="return confirm('Завершить приемку? Брак и недостача (если кол-во на пересчете оказалось меньше, чем по накладной) уйдут отдельными возвратами поставщику, остальное — в неразмещенный остаток.');">
+        onsubmit="return confirm('Завершить приемку? В остаток попадет только фактически принятое годное количество. Выделенный брак уйдет отдельным возвратом поставщику, а недопоставка не будет зачислена на склад.');">
     <input type="hidden" name="next" value="confirm">
     <button type="submit" class="btn btn-success btn-sm">✅ Завершить приемку</button>
   </form>
@@ -49,8 +49,9 @@
   <div class="collapse mt-2" id="addUnlistedForm">
     <div class="card card-body p-2">
       <div class="text-muted small mb-2">Если привезли товар, которого нет в накладной</div>
-      <form method="post" action="{{ url_for('receiving.add_line', doc_id=doc.id) }}" class="d-flex flex-column gap-2">
+      <form method="post" action="{{ url_for('receiving.add_line', doc_id=doc.id) }}" class="d-flex flex-column gap-2" data-single-submit>
         <input type="hidden" name="next" value="confirm">
+        <input type="hidden" name="request_token" value="{{ add_request_token }}">
         <div class="autocomplete-box" data-autocomplete-nomenclature>
           <input type="text" class="form-control ac-input" placeholder="Артикул, наименование или штрихкод..." autocomplete="off">
           <input type="hidden" class="ac-value" name="nomenclature_id" required>

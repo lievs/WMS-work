@@ -70,7 +70,7 @@
                 </span>
               </div>
               <div class="small text-muted">{{ d.warehouse.name }}</div>
-              <div class="small text-muted">{{ (d.created_at|msk).strftime('%d.%m.%Y') }} · {{ d.scanned_boxes.count() }} короб. · {{ d.lines.count() }} поз.</div>
+              <div class="small text-muted">{{ (d.created_at|msk).strftime('%d.%m.%Y') }} · {{ d.scanned_boxes.count() }} короб. · {{ d.lines.count() }} поз.{% if d.created_by %} · Автор: {{ d.created_by.display_name() }}{% endif %}</div>
               {% if d.status == 'merged' and d.merged_into %}
                 <a class="small" href="{{ url_for('inventory.detail', doc_id=d.merged_into_id) }}">→ {{ d.merged_into.number }}</a>
               {% endif %}

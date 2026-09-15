@@ -13,6 +13,7 @@ from wms.models import (
     ShipmentPlanLine,
     Warehouse,
 )
+from wms.blueprints.movement import _compute_routing
 
 
 def _setup_plan(planned_qty=30, fulfilled_qty=0):
@@ -59,7 +60,12 @@ def test_routing_recommends_city_with_demand(db, client_logged_in):
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
     assert "ОЗОН: Город" in html
-    assert "30 шт." in html  # полная потребность, пока ничего еще не отправлено
+    assert box.box_number in html
+    assert "Покрывает" not in html
+    assert "Нужно всего" not in html
+    assert "Содержимое короба" in html
+    assert "Товар" in html
+    assert "30 шт." not in html
 
 
 def test_routing_subtracts_already_committed_boxes(db, client_logged_in):
@@ -73,11 +79,8 @@ def test_routing_subtracts_already_committed_boxes(db, client_logged_in):
         "/movement/route-box/add", data={"box_id": box1.id, "to_warehouse_id": city.id}
     )
 
-    resp = client_logged_in.get(f"/movement/route-box?box_number={box2.box_number}")
-    html = resp.get_data(as_text=True)
-
-    assert "20 шт." in html
-    assert "30 шт." not in html
+    routing = _compute_routing(box2)
+    assert routing[0]["total_remaining"] == 20
 
 
 def test_routing_subtracts_boxes_already_in_transit(db, client_logged_in):
@@ -99,11 +102,8 @@ def test_routing_subtracts_boxes_already_in_transit(db, client_logged_in):
     assert doc.status == "completed"
     assert doc.received_at is None  # именно "в пути", не принято
 
-    resp = client_logged_in.get(f"/movement/route-box?box_number={box2.box_number}")
-    html = resp.get_data(as_text=True)
-
-    assert "20 шт." in html
-    assert "30 шт." not in html
+    routing = _compute_routing(box2)
+    assert routing[0]["total_remaining"] == 20
 
 
 def test_routing_add_stays_on_scanning_page_not_document(db, client_logged_in):

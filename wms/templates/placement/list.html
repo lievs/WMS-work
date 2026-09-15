@@ -8,7 +8,6 @@
 
 {% set hint_stock = "Принятый товар, который еще не упакован в короба и не расставлен по ячейкам." %}
 {% set hint_open_boxes = "Уже упакованы, но не расставлены (например, приехали перемещением). Разместите сразу здесь." %}
-{% set hint_returns = "Списано со склада здесь — сам документ возврата оформляется в 1С отдельно, количество ниже для сверки." %}
 
 <div class="row g-4 mb-4">
   <div class="col-md-6">
@@ -20,7 +19,7 @@
       </h5>
       <p class="text-muted small d-none d-md-block">{{ hint_stock }}</p>
       <table class="table table-sm table-mobile-compact">
-        <thead><tr><th>Склад</th><th>Штрихкод</th><th>Наименование</th><th>Размер</th><th>Кол-во</th><th>Поступление</th><th></th></tr></thead>
+        <thead><tr><th>Склад</th><th>Штрихкод</th><th>Наименование</th><th>Размер</th><th>Кол-во</th><th>Поступление</th></tr></thead>
         <tbody>
         {% for row in stock_rows %}
           <tr>
@@ -36,24 +35,9 @@
                 {%- if lot.order_number %} (№{{ lot.order_number }}){% endif %}{% if not loop.last %}<br>{% endif %}
               {% else %}—{% endfor %}
             </td>
-            <td>
-              <details>
-                <summary class="btn btn-sm btn-outline-danger">Возврат</summary>
-                <form method="post" action="{{ url_for('placement.write_off_stock') }}" class="d-flex gap-1 mt-2">
-                  <input type="hidden" name="warehouse_id" value="{{ row.warehouse_id }}">
-                  <input type="hidden" name="nomenclature_id" value="{{ row.nomenclature_id }}">
-                  <input type="number" step="any" min="0" max="{{ row.qty }}" name="qty" value="{{ row.qty }}"
-                         class="form-control form-control-sm" style="max-width:100px" required>
-                  <button type="submit" class="btn btn-sm btn-danger"
-                          onclick="return confirm('Списать со склада как брак/возврат поставщику? Сам возврат в 1С проводится отдельно.');">
-                    Подтвердить
-                  </button>
-                </form>
-              </details>
-            </td>
           </tr>
         {% else %}
-          <tr><td colspan="7" class="text-muted">Неразмещенных остатков нет</td></tr>
+          <tr><td colspan="6" class="text-muted">Неразмещенных остатков нет</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -94,31 +78,6 @@
   </div>
 </div>
 
-<div class="card p-3 mb-4">
-  <h5 class="d-flex align-items-center gap-2">
-    Возвраты поставщику (брак)
-    <button type="button" class="hint-icon d-md-none" data-bs-toggle="popover" data-bs-trigger="focus"
-            data-bs-placement="bottom" data-bs-content="{{ hint_returns }}" aria-label="Подсказка">?</button>
-  </h5>
-  <p class="text-muted small d-none d-md-block">{{ hint_returns }}</p>
-  <table class="table table-sm table-mobile-compact table-allow-wrap">
-    <thead><tr><th>Дата</th><th>Склад</th><th>Наименование</th><th>Кол-во</th><th>Кто списал</th></tr></thead>
-    <tbody>
-    {% for r in returns %}
-      <tr>
-        <td>{{ (r.created_at|msk).strftime('%d.%m.%Y %H:%M') }}</td>
-        <td>{{ r.warehouse.name }}</td>
-        <td>{{ r.nomenclature.name }} {{ r.nomenclature.size or '' }}</td>
-        <td>{{ r.qty }} {{ r.nomenclature.unit }}</td>
-        <td>{{ r.created_by.display_name() if r.created_by else '' }}</td>
-      </tr>
-    {% else %}
-      <tr><td colspan="5" class="text-muted">Возвратов еще не было</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</div>
-
 <div class="card p-3">
   <h5>Документы размещения</h5>
   <table class="table d-none d-md-table">
@@ -150,7 +109,7 @@
           <span class="badge badge-status-{{ d.status }}">{{ 'Черновик' if d.status == 'draft' else 'Завершен' }}</span>
         </div>
         <div class="small text-muted">{{ d.warehouse.name }}</div>
-        <div class="small text-muted">{{ (d.created_at|msk).strftime('%d.%m.%Y') }}</div>
+        <div class="small text-muted">{{ (d.created_at|msk).strftime('%d.%m.%Y') }}{% if d.created_by %} · Автор: {{ d.created_by.display_name() }}{% endif %}</div>
       </div>
     {% else %}
       <div class="list-group-item text-muted">Документов еще нет</div>

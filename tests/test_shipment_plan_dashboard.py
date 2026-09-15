@@ -269,11 +269,9 @@ def test_picking_list_shows_receiving_on_recount_and_sorting_as_unplaced(db, cli
     assert ">10<" in snippet  # 12 - 2 брака = 10 годного "на разбраковке"
 
 
-def test_picking_list_shows_invoice_receiving_still_in_draft_as_unplaced(db, client_logged_in):
-    """Сразу после загрузки накладной документ еще в draft (кладовщик пока
-    сверяет первичное кол-во) — до "Отправить на пересчет" далеко, но товар
-    физически уже привезли на склад. План отгрузок не должен ждать перехода
-    в пересчет/разбраковку, чтобы это увидеть."""
+def test_picking_list_ignores_invoice_receiving_still_in_draft(db, client_logged_in):
+    """Заявленное в накладной количество еще не является поступившим:
+    черновик не должен попадать в колонку «На разбраковку» или остаток."""
     sender, city, item = _setup(planned_qty=30)
     doc = ReceivingDocument(
         number="REC-PLAN-2",
@@ -289,7 +287,49 @@ def test_picking_list_shows_invoice_receiving_still_in_draft_as_unplaced(db, cli
     html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
     idx = html.find("ART-1")
     snippet = html[idx : idx + 3000]
-    assert ">7<" in snippet
+    assert ">7<" not in snippet
+
+
+def test_picking_list_counts_only_confirmed_invoice_lines_on_recount(db, client_logged_in):
+    """На пересчете показываем фактически подтвержденное количество, а не
+    все заявленные поставщиком позиции."""
+    sender, city, item = _setup(planned_qty=30)
+    other = Nomenclature(sku="SKU-D2", barcode="7770000002", name="Не поступил", unit="шт")
+    db.session.add(other)
+    db.session.commit()
+    doc = ReceivingDocument(
+        number="REC-PLAN-FACT",
+        warehouse_id=sender.id,
+        supplier="ИП Тестов",
+        invoice_file_name="накладная.xlsx",
+        status="recounting",
+    )
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add_all(
+        [
+            ReceivingLine(
+                document_id=doc.id,
+                nomenclature_id=item.id,
+                qty=6,
+                expected_qty=10,
+                confirmed=True,
+            ),
+            ReceivingLine(
+                document_id=doc.id,
+                nomenclature_id=other.id,
+                qty=9,
+                expected_qty=9,
+                confirmed=False,
+            ),
+        ]
+    )
+    db.session.commit()
+
+    html = client_logged_in.get("/shipment-plan/").get_data(as_text=True)
+    idx = html.find("ART-1")
+    snippet = html[idx : idx + 3000]
+    assert ">6<" in snippet
 
 
 def test_picking_list_ignores_plain_draft_receiving_without_invoice(db, client_logged_in):

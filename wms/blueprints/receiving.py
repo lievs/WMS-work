@@ -1,4 +1,5 @@
 import io
+import secrets
 from datetime import datetime
 
 from flask import (
@@ -13,7 +14,8 @@ from flask import (
     url_for,
 )
 from flask_login import current_user
-from sqlalchemy import func
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 
 from ..extensions import db
 from ..models import (
@@ -26,13 +28,82 @@ from ..models import (
     SupplierReturn,
     UnplacedStock,
     UnplacedStockLot,
+    Warehouse,
 )
+from ..utils.document_access import get_owned_or_404
 from ..utils.excel_io import export_receiving_to_excel, timestamp_for_filename
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 from ..utils.receiving_invoice_import import InvoiceParseError, parse_invoice
 
 bp = Blueprint("receiving", __name__)
+
+
+@bp.before_request
+def _restrict_document_access():
+    document_id = (request.view_args or {}).get("doc_id")
+    if document_id is None:
+        return None
+
+    doc = ReceivingDocument.query.get_or_404(document_id)
+    if (
+        request.method == "GET"
+        and current_user.can_view_invoice_receivings()
+        and doc.is_from_invoice_import()
+    ):
+        return None
+    get_owned_or_404(ReceivingDocument, document_id)
+    return None
+
+
+def _visible_receiving_query():
+    """Приемки, видимые пользователю в списке."""
+    query = ReceivingDocument.query
+    if current_user.is_admin:
+        return query
+    if current_user.can_view_invoice_receivings():
+        return query.filter(
+            or_(
+                ReceivingDocument.created_by_id == current_user.id,
+                ReceivingDocument.invoice_file_name.isnot(None),
+            )
+        )
+    return query.filter(ReceivingDocument.created_by_id == current_user.id)
+
+
+def _receiving_warehouses():
+    """В приемке доступны только согласованные физические склады."""
+    allowed_names = (
+        "основной",
+        "основной склад",
+        "склад №2",
+        "склад №2 (шоссейная 167)",
+    )
+    warehouses = (
+        Warehouse.query.filter(
+            Warehouse.is_active.is_(True),
+            func.lower(func.trim(Warehouse.name)).in_(allowed_names),
+        )
+        .order_by(Warehouse.code)
+        .all()
+    )
+    if warehouses:
+        return warehouses
+    # Обратная совместимость для старой базы, где физические склады могли
+    # называться иначе: до переименования берем первые три по коду,
+    # но склады-городá маркетплейсов в приемку никогда не попадают.
+    return (
+        Warehouse.query.filter_by(is_active=True, marketplace=None)
+        .order_by(Warehouse.code)
+        .limit(3)
+        .all()
+    )
+
+
+def _receiving_warehouse_or_none(warehouse_id):
+    if not warehouse_id:
+        return None
+    return next((wh for wh in _receiving_warehouses() if wh.id == warehouse_id), None)
 
 
 def _next_redirect(doc_id):
@@ -54,7 +125,7 @@ def list_documents():
     unfinished_only = request.args.get("unfinished") == "on"
     invoice_only = request.args.get("invoice_only") == "on"
 
-    query = ReceivingDocument.query
+    query = _visible_receiving_query()
     if unfinished_only:
         query = query.filter(ReceivingDocument.status != "completed")
     if invoice_only:
@@ -79,6 +150,17 @@ def returns_list():
     unsynced_only = request.args.get("unsynced") == "on"
 
     query = SupplierReturn.query
+    if not current_user.is_admin:
+        query = query.join(ReceivingDocument)
+        if current_user.can_view_invoice_receivings():
+            query = query.filter(
+                or_(
+                    ReceivingDocument.created_by_id == current_user.id,
+                    ReceivingDocument.invoice_file_name.isnot(None),
+                )
+            )
+        else:
+            query = query.filter(ReceivingDocument.created_by_id == current_user.id)
     if unsynced_only:
         query = query.filter(SupplierReturn.synced_to_1c_at.is_(None))
 
@@ -90,17 +172,16 @@ def returns_list():
 
 @bp.route("/new", methods=["GET", "POST"])
 def new_document():
-    from ..models import Warehouse
-
     if request.method == "GET":
-        warehouses = Warehouse.query.filter_by(is_active=True).order_by(Warehouse.code).all()
+        warehouses = _receiving_warehouses()
         return render_template("receiving/new.html", warehouses=warehouses)
 
     warehouse_id = request.form.get("warehouse_id", type=int)
     supplier = request.form.get("supplier", "").strip()
 
-    if not warehouse_id:
-        flash("Выберите склад приемки", "danger")
+    warehouse = _receiving_warehouse_or_none(warehouse_id)
+    if not warehouse:
+        flash("Для приемки выберите один из разрешенных складов", "danger")
         return redirect(url_for("receiving.new_document"))
 
     doc = ReceivingDocument(
@@ -150,15 +231,14 @@ def import_invoice_form():
     приемки, поставщик определяется из файла (и заводится в справочник,
     если его еще нет), товары и количество подставляются из накладной.
     Дальше кладовщик сверяет их на мобильной форме (см. confirm_invoice)."""
-    from ..models import Warehouse
-
     if request.method == "GET":
-        warehouses = Warehouse.query.filter_by(is_active=True).order_by(Warehouse.code).all()
+        warehouses = _receiving_warehouses()
         return render_template("receiving/import_invoice.html", warehouses=warehouses)
 
     warehouse_id = request.form.get("warehouse_id", type=int)
-    if not warehouse_id:
-        flash("Выберите склад приемки", "danger")
+    warehouse = _receiving_warehouse_or_none(warehouse_id)
+    if not warehouse:
+        flash("Для приемки выберите один из разрешенных складов", "danger")
         return redirect(url_for("receiving.import_invoice_form"))
 
     file = request.files.get("file")
@@ -248,7 +328,11 @@ def confirm_invoice(doc_id):
     lines = doc.lines.order_by(ReceivingLine.id).all()
     confirmed_count = sum(1 for line in lines if line.confirmed)
     return render_template(
-        "receiving/confirm_invoice.html", doc=doc, lines=lines, confirmed_count=confirmed_count
+        "receiving/confirm_invoice.html",
+        doc=doc,
+        lines=lines,
+        confirmed_count=confirmed_count,
+        add_request_token=secrets.token_urlsafe(24),
     )
 
 
@@ -312,8 +396,6 @@ def confirm_line(doc_id, line_id):
 
 @bp.route("/<int:doc_id>")
 def detail(doc_id):
-    from ..models import Warehouse
-
     doc = ReceivingDocument.query.get_or_404(doc_id)
     lines = doc.lines.all()
 
@@ -332,7 +414,7 @@ def detail(doc_id):
         Box.query.filter(Box.id.in_(packed_box_ids)).all() if packed_box_ids else []
     )
 
-    warehouses = Warehouse.query.filter_by(is_active=True).order_by(Warehouse.code).all()
+    warehouses = _receiving_warehouses()
 
     return render_template(
         "receiving/detail.html",
@@ -341,14 +423,43 @@ def detail(doc_id):
         active_box=active_box,
         packed_boxes=packed_boxes,
         warehouses=warehouses,
+        add_request_token=secrets.token_urlsafe(24),
     )
 
 
-def _add_or_increment_line(doc, nomenclature, qty):
-    line = ReceivingLine(document_id=doc.id, nomenclature_id=nomenclature.id, qty=qty)
+def _existing_add_request(request_token):
+    if not request_token:
+        return None
+    return ReceivingLine.query.filter_by(request_token=request_token).first()
+
+
+def _commit_receiving_add(line, request_token):
+    """Коммитит добавление и превращает гонку одинаковых запросов в
+    безопасный повтор. Уникальный индекс защищает даже два одновременных
+    запроса, пришедших в разные процессы приложения."""
+    try:
+        db.session.commit()
+        return line, False
+    except IntegrityError:
+        db.session.rollback()
+        existing = _existing_add_request(request_token)
+        if existing:
+            return existing, True
+        raise
+
+
+def _add_or_increment_line(doc, nomenclature, qty, request_token=None):
+    existing = _existing_add_request(request_token)
+    if existing:
+        return existing, True
+    line = ReceivingLine(
+        document_id=doc.id,
+        nomenclature_id=nomenclature.id,
+        qty=qty,
+        request_token=request_token or None,
+    )
     db.session.add(line)
-    db.session.commit()
-    return line
+    return _commit_receiving_add(line, request_token)
 
 
 def _box_category_warning(box, item):
@@ -372,7 +483,7 @@ def _box_category_warning(box, item):
     return {"category": category.name, "qty": total, "threshold": category.box_qty_warning}
 
 
-def _receive_item_into_box(doc, box, item, qty):
+def _receive_item_into_box(doc, box, item, qty, request_token=None):
     """Приемка сразу в короб — товар физически упаковывается в момент
     приемки, минуя неразмещенный остаток (см. complete(): строки с box_id
     в него не идут).
@@ -382,6 +493,10 @@ def _receive_item_into_box(doc, box, item, qty):
     физически это те же единицы, которые наконец кладут в короб, и
     списываем их со старого остатка вместо того, чтобы задваивать учет
     (остаток "висел" неразмещенным — и теперь еще и в коробе)."""
+    existing = _existing_add_request(request_token)
+    if existing:
+        return existing, None, True
+
     dedup_qty = min(qty, UnplacedStock.available(doc.warehouse_id, item.id))
     if dedup_qty > 0:
         UnplacedStock.consume(doc.warehouse_id, item.id, dedup_qty)
@@ -393,11 +508,19 @@ def _receive_item_into_box(doc, box, item, qty):
         box_item = BoxItem(box_id=box.id, nomenclature_id=item.id, qty=qty)
         db.session.add(box_item)
 
-    line = ReceivingLine(document_id=doc.id, nomenclature_id=item.id, qty=qty, box_id=box.id)
+    line = ReceivingLine(
+        document_id=doc.id,
+        nomenclature_id=item.id,
+        qty=qty,
+        box_id=box.id,
+        request_token=request_token or None,
+    )
     db.session.add(line)
-    db.session.commit()
+    line, duplicate = _commit_receiving_add(line, request_token)
+    if duplicate:
+        return line, None, True
     warning = _box_category_warning(box, item)
-    return line, warning
+    return line, warning, False
 
 
 @bp.route("/<int:doc_id>/boxes/select", methods=["POST"])
@@ -451,15 +574,18 @@ def add_line_to_box_by_barcode(doc_id, box_id):
     if not box:
         return jsonify({"ok": False, "error": "Короб не найден"}), 404
 
-    barcode = (request.json or {}).get("barcode", "").strip()
-    qty = float((request.json or {}).get("qty", 1) or 1)
+    payload = request.json or {}
+    barcode = payload.get("barcode", "").strip()
+    qty = float(payload.get("qty", 1) or 1)
+    request_token = str(payload.get("request_token", ""))[:64]
     item = Nomenclature.query.filter_by(barcode=barcode).first()
     if not item:
         return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
 
-    line, warning = _receive_item_into_box(doc, box, item, qty)
+    line, warning, duplicate = _receive_item_into_box(doc, box, item, qty, request_token)
     resp = {
         "ok": True,
+        "duplicate": duplicate,
         "line": {"id": line.id, "name": item.name, "sku": item.sku, "qty": line.qty},
         "box_item_count": box.items.count(),
     }
@@ -484,7 +610,11 @@ def add_line_to_box(doc_id, box_id):
         flash("Товар не найден", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc.id, box=box_id))
 
-    _line, warning = _receive_item_into_box(doc, box, item, qty)
+    request_token = request.form.get("request_token", "")[:64]
+    _line, warning, duplicate = _receive_item_into_box(doc, box, item, qty, request_token)
+    if duplicate:
+        flash("Повторный запрос распознан — товар второй раз не добавлен", "info")
+        return redirect(url_for("receiving.detail", doc_id=doc.id))
     flash(f"В короб {box.box_number} добавлено: {item.name} ({qty} {item.unit})", "success")
     if warning:
         flash(
@@ -505,16 +635,19 @@ def add_line_by_barcode(doc_id):
     if doc.status != "draft":
         return jsonify({"ok": False, "error": "Документ уже завершен"}), 400
 
-    barcode = (request.json or {}).get("barcode", "").strip()
-    qty = (request.json or {}).get("qty", 1) or 1
+    payload = request.json or {}
+    barcode = payload.get("barcode", "").strip()
+    qty = payload.get("qty", 1) or 1
+    request_token = str(payload.get("request_token", ""))[:64]
     item = Nomenclature.query.filter_by(barcode=barcode).first()
     if not item:
         return jsonify({"ok": False, "error": f"Товар со штрихкодом '{barcode}' не найден"}), 404
 
-    line = _add_or_increment_line(doc, item, float(qty))
+    line, duplicate = _add_or_increment_line(doc, item, float(qty), request_token)
     return jsonify(
         {
             "ok": True,
+            "duplicate": duplicate,
             "line": {"id": line.id, "name": item.name, "sku": item.sku, "qty": line.qty},
         }
     )
@@ -546,7 +679,11 @@ def add_line(doc_id):
         flash("Товар не найден", "danger")
         return redirect(redirect_url)
 
-    _add_or_increment_line(doc, item, qty)
+    request_token = request.form.get("request_token", "")[:64]
+    _line, duplicate = _add_or_increment_line(doc, item, qty, request_token)
+    if duplicate:
+        flash("Повторный запрос распознан — товар второй раз не добавлен", "info")
+        return redirect(redirect_url)
     flash(f"Добавлено: {item.name} ({qty} {item.unit})", "success")
     return redirect(redirect_url)
 
@@ -563,7 +700,7 @@ def update_line(doc_id, line_id):
 
     line = ReceivingLine.query.filter_by(id=line_id, document_id=doc_id).first_or_404()
     qty = request.form.get("qty", type=float)
-    if qty is None or qty <= 0:
+    if qty is None or qty < 0:
         flash("Укажите корректное количество", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
@@ -575,6 +712,8 @@ def update_line(doc_id, line_id):
                 db.session.delete(box_item)
 
     line.qty = qty
+    if doc.status == "recounting" and line.expected_qty is not None:
+        line.confirmed = True
     db.session.commit()
     flash(f"Количество обновлено: {line.nomenclature.name} — {qty} {line.nomenclature.unit}", "success")
     return redirect(url_for("receiving.detail", doc_id=doc_id))
@@ -600,7 +739,12 @@ def update_lines_bulk(doc_id):
             qty = float(raw)
         except ValueError:
             continue
-        if qty <= 0 or qty == line.qty:
+        if qty < 0:
+            continue
+
+        if doc.status == "recounting" and line.expected_qty is not None:
+            line.confirmed = True
+        if qty == line.qty:
             continue
 
         if line.box_id:
@@ -688,9 +832,9 @@ def change_warehouse(doc_id):
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
     warehouse_id = request.form.get("warehouse_id", type=int)
-    warehouse = Warehouse.query.get(warehouse_id) if warehouse_id else None
+    warehouse = _receiving_warehouse_or_none(warehouse_id)
     if not warehouse:
-        flash("Выберите склад", "danger")
+        flash("Для приемки выберите один из разрешенных складов", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
     doc.warehouse_id = warehouse.id
@@ -798,6 +942,11 @@ def complete(doc_id):
             # ячейки, пока его не разместят обычным способом через
             # «Размещение».
             continue
+        # У строки из накладной qty до подтверждения равно заявленному
+        # поставщиком количеству. Неподтвержденная позиция не является
+        # фактически принятой и не должна создавать остаток на нашем складе.
+        if line.expected_qty is not None and not line.confirmed:
+            continue
         good_qty = line.good_qty()
         if good_qty > 0:
             UnplacedStock.add(doc.warehouse_id, line.nomenclature_id, good_qty, receiving_document=doc)
@@ -814,30 +963,9 @@ def complete(doc_id):
                     invoice_number=doc.number if doc.is_from_invoice_import() else None,
                 )
             )
-        # Недостача — по накладной заявлено больше, чем фактически подтвердили
-        # на пересчете (line.qty поправляется прямо в строке, исходное
-        # expected_qty не трогается специально для этого сравнения). Только
-        # для строк из накладной (expected_qty есть только у них — см.
-        # import_invoice_form); вручную добавленные строки сравнивать не с
-        # чем. Как и брак, это отдельный возврат поставщику — попадет в тот
-        # же документ 1С, что и брак по этой приемке (см. _supplier_returns_export).
-        shortage = (line.expected_qty - line.qty) if line.expected_qty is not None else 0
-        if shortage > 0:
-            db.session.add(
-                SupplierReturn(
-                    warehouse_id=doc.warehouse_id,
-                    nomenclature_id=line.nomenclature_id,
-                    qty=shortage,
-                    comment=(
-                        f"Недостача при пересчете приемки {doc.number} "
-                        f"(по накладной {line.expected_qty}, принято {line.qty})"
-                    ),
-                    created_by_id=current_user.id,
-                    receiving_document_id=doc.id,
-                    supplier_name=doc.supplier,
-                    invoice_number=doc.number if doc.is_from_invoice_import() else None,
-                )
-            )
+        # Расхождение с накладной не является возвратом. Во всех статусах,
+        # кроме разбраковки, учет ведется по фактически принятому line.qty;
+        # SupplierReturn создается только из явно указанного defect_qty.
 
     doc.status = "completed"
     doc.completed_at = datetime.utcnow()

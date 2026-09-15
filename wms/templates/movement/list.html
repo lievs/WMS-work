@@ -125,7 +125,7 @@
       </div>
       <div class="d-flex gap-2">
         {% if current_user.is_admin %}
-        <button type="submit" formaction="{{ url_for('movement.merge_documents') }}" class="btn btn-outline-secondary btn-sm" id="mergeDocsBtn" disabled
+        <button type="submit" formmethod="post" formaction="{{ url_for('movement.merge_documents') }}" class="btn btn-outline-secondary btn-sm" id="mergeDocsBtn" disabled
                 onclick="return confirm('Объединить выбранные черновики в один документ? Короба переедут в новый документ, старые останутся в истории со статусом «Объединен».');">🔀 Объединить выбранные (<span id="selectedDocsCount3">0</span>)</button>
         {% endif %}
         <button type="submit" formaction="{{ url_for('movement.export_shipping_labels') }}" class="btn btn-outline-secondary btn-sm" id="printLabelsBtn" disabled>🏷️ Стикеры на короба (<span id="selectedDocsCount2">0</span>)</button>

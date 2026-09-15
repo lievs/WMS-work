@@ -179,6 +179,7 @@ def update_sections(user_id):
     user.nomenclature_edit_allowed = request.form.get("nomenclature_edit") == "on"
     user.warehouse_mapping_allowed = request.form.get("warehouse_mapping") == "on"
     user.invoice_receiving_view_allowed = request.form.get("invoice_receiving_view") == "on"
+    user.movement_view_allowed = request.form.get("movement_view") == "on"
     db.session.commit()
     flash(f"Доступ к разделам для «{user.username}» обновлен", "success")
     return redirect(url_for("auth.users"))

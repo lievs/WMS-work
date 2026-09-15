@@ -19,7 +19,7 @@ from ..models import (
     Warehouse,
 )
 from ..utils.excel_io import export_movement_to_excel, timestamp_for_filename
-from ..utils.document_access import ensure_view_document_access, owned_query
+from ..utils.document_access import get_owned_or_404, owned_query
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 from ..utils.shipping_label_pdf import build_movement_shipping_labels_pdf
@@ -30,7 +30,21 @@ bp = Blueprint("movement", __name__)
 
 @bp.before_request
 def _restrict_document_access():
-    ensure_view_document_access(MovementDocument)
+    document_id = (request.view_args or {}).get("doc_id")
+    if document_id is None:
+        return None
+    readonly_endpoints = {"movement.detail", "movement.export_document"}
+    if request.endpoint in readonly_endpoints and current_user.can_view_movements():
+        MovementDocument.query.get_or_404(document_id)
+        return None
+    get_owned_or_404(MovementDocument, document_id)
+    return None
+
+
+def _visible_movement_query():
+    if current_user.can_view_movements():
+        return MovementDocument.query
+    return owned_query(MovementDocument)
 
 SHIPPING_LABEL_SENDER_KEY = "movement_shipping_label_sender"
 
@@ -126,7 +140,7 @@ def _compute_routing(box):
 
 @bp.route("/")
 def list_documents():
-    documents = owned_query(MovementDocument).order_by(MovementDocument.created_at.desc()).all()
+    documents = _visible_movement_query().order_by(MovementDocument.created_at.desc()).all()
     return render_template(
         "movement/list.html",
         documents=documents,
@@ -218,7 +232,7 @@ def route_box():
     ни у кого, и короб можно пропустить). Только просмотр — сам короб
     добавляется в конкретное перемещение отдельным действием ниже."""
     box_number = request.args.get("box_number", "").strip()
-    documents = owned_query(MovementDocument).order_by(MovementDocument.created_at.desc()).all()
+    documents = _visible_movement_query().order_by(MovementDocument.created_at.desc()).all()
 
     box = None
     routing = []
@@ -247,7 +261,7 @@ def find_box():
     новое перемещение не дает блокировка "уже в другом перемещении" (см.
     _find_conflicting_movement_line) — здесь видно, в каком именно."""
     box_number = request.args.get("box_number", "").strip()
-    documents = owned_query(MovementDocument).order_by(MovementDocument.created_at.desc()).all()
+    documents = _visible_movement_query().order_by(MovementDocument.created_at.desc()).all()
 
     box = None
     not_found = False
@@ -262,7 +276,7 @@ def find_box():
                 .join(MovementDocument, MovementLine.document_id == MovementDocument.id)
                 .filter(
                     True
-                    if current_user.is_admin
+                    if current_user.can_view_movements()
                     else MovementDocument.created_by_id == current_user.id
                 )
                 .order_by(MovementDocument.created_at.desc())
@@ -847,7 +861,7 @@ def export_document(doc_id):
 
 @bp.route("/export.xlsx")
 def export_all():
-    documents = owned_query(MovementDocument).order_by(MovementDocument.created_at.desc()).all()
+    documents = _visible_movement_query().order_by(MovementDocument.created_at.desc()).all()
     data = export_movement_to_excel(documents)
     fname = f"movements_{timestamp_for_filename()}.xlsx"
     return Response(
@@ -869,7 +883,7 @@ def export_waybills():
         return redirect(url_for("movement.list_documents"))
 
     documents = (
-        owned_query(MovementDocument).filter(MovementDocument.id.in_(doc_ids))
+        _visible_movement_query().filter(MovementDocument.id.in_(doc_ids))
         .order_by(MovementDocument.created_at.desc())
         .all()
     )
@@ -899,7 +913,7 @@ def export_shipping_labels():
         return redirect(url_for("movement.list_documents"))
 
     documents = (
-        owned_query(MovementDocument).filter(MovementDocument.id.in_(doc_ids))
+        _visible_movement_query().filter(MovementDocument.id.in_(doc_ids))
         .order_by(MovementDocument.created_at.desc())
         .all()
     )

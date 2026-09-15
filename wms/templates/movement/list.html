@@ -137,6 +137,7 @@
       <thead><tr><th></th><th>Номер</th><th>Дата</th><th>Откуда</th><th>Куда</th><th>Коробов</th><th>Кол-во товара</th><th>Автор</th><th>Статус</th><th>Приемка</th><th class="text-center">1С</th><th class="text-center">Заявка на МП</th><th></th></tr></thead>
       <tbody>
       {% for d in documents %}
+        {% set can_manage_document = current_user.is_admin or d.created_by_id == current_user.id %}
         <tr>
           <td><input type="checkbox" class="form-check-input doc-checkbox" data-status="{{ d.status }}" name="doc_ids" value="{{ d.id }}"></td>
           <td>
@@ -164,16 +165,22 @@
             {% elif d.received_at %}
               <span class="badge bg-success" title="{{ (d.received_at|msk).strftime('%d.%m.%Y %H:%M') }}">Принято {{ (d.received_at|msk).strftime('%d.%m') }}</span>
               {% if d.discrepancies %}<span class="badge bg-warning text-dark">С расхождением</span>{% endif %}
-            {% else %}
+            {% elif can_manage_document %}
               <button type="submit" formmethod="post" formaction="{{ url_for('movement.receive', doc_id=d.id) }}" class="btn btn-sm btn-warning" title="Товар считается «в пути», пока не нажата эта кнопка">📥 Принято на складе</button>
               <a class="btn btn-sm btn-outline-warning" href="{{ url_for('movement.receive_with_discrepancy', doc_id=d.id) }}"
                  title="Если на месте приняли не столько, сколько отправили">⚠️ С расхождением</a>
+            {% else %}
+              <span class="text-warning-emphasis">В пути</span>
             {% endif %}
           </td>
           <td class="text-center">
+            {% if can_manage_document %}
             <button type="submit" formmethod="post" formaction="{{ url_for('movement.toggle_accounting', doc_id=d.id) }}"
                   title="{{ 'Внесено в 1С бухгалтерией ' + (d.accounting_entered_at|msk).strftime('%d.%m.%Y %H:%M') if d.accounting_entered_at else 'Отметить: бухгалтерия внесла документ в 1С' }}"
                   class="btn btn-sm btn-link p-0" style="font-size:1.15rem; line-height:1; text-decoration:none;">{{ '✅' if d.accounting_entered_at else '☐' }}</button>
+            {% else %}
+              {{ '✅' if d.accounting_entered_at else '☐' }}
+            {% endif %}
           </td>
           <td class="text-center">
             <button type="submit" formmethod="post" formaction="{{ url_for('movement.toggle_marketplace_request', doc_id=d.id) }}"

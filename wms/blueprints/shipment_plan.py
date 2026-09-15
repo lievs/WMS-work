@@ -1,6 +1,8 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+import threading
+import time
 
-from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
+from flask import Blueprint, Response, current_app, flash, redirect, render_template, request, url_for
 from flask_login import current_user
 from sqlalchemy import func, or_
 
@@ -8,6 +10,7 @@ from ..extensions import db
 from ..models import (
     Box,
     BoxItem,
+    AppSetting,
     MovementDocument,
     MovementLine,
     Nomenclature,
@@ -23,6 +26,13 @@ from ..utils.excel_io import export_shipment_plan_to_excel, timestamp_for_filena
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 from ..utils.shipment_plan_import import extract_period_start, parse_plan_sheet
+from ..utils.google_sheets import (
+    google_sheets_configured,
+    load_distribution_workbook,
+    received_wms_totals,
+    write_distribution_facts,
+    write_wms_movement_sheet,
+)
 from .warehouses import default_fulfillment_1c_name
 
 bp = Blueprint("shipment_plan", __name__)
@@ -30,6 +40,11 @@ bp = Blueprint("shipment_plan", __name__)
 MARKETPLACES = ("ozon", "wb")
 MARKETPLACE_LABELS = {"ozon": "ОЗОН", "wb": "ВБ"}
 PERIOD_DAYS = 14
+GOOGLE_SYNC_AT_KEY = "google_sheets_last_sync_at"
+GOOGLE_SYNC_ERROR_KEY = "google_sheets_last_error"
+GOOGLE_SYNC_SHEETS_KEY = "google_sheets_last_names"
+_google_sync_lock = threading.Lock()
+_google_sync_started_at = 0.0
 
 
 def _get_or_create_city_warehouse(marketplace, city_name):
@@ -51,7 +66,7 @@ def _get_or_create_city_warehouse(marketplace, city_name):
     return wh
 
 
-def _apply_plan(marketplace, parsed):
+def _apply_plan(marketplace, parsed, uploaded_by_id=None):
     """Полностью заменяет строки плана этого маркетплейса новыми из файла."""
     plan = ShipmentPlan.query.filter_by(marketplace=marketplace).first()
     if not plan:
@@ -59,7 +74,8 @@ def _apply_plan(marketplace, parsed):
         db.session.add(plan)
 
     plan.sheet_name = parsed.sheet_name
-    plan.uploaded_by_id = current_user.id
+    plan.uploaded_by_id = uploaded_by_id
+    plan.uploaded_at = datetime.utcnow()
     plan.period_start = extract_period_start(parsed.sheet_name)
 
     plan.lines.delete()
@@ -73,6 +89,7 @@ def _apply_plan(marketplace, parsed):
         n.barcode: n
         for n in Nomenclature.query.filter(Nomenclature.barcode.in_(barcodes)).all()
     }
+    local_received = received_wms_totals()
 
     # Один и тот же штрихкод изредка встречается в файле больше одного раза
     # для одного и того же города (дубль строки при ручном ведении таблицы) —
@@ -105,12 +122,109 @@ def _apply_plan(marketplace, parsed):
                 # Факт "отгружено / в пути" из самого файла плана — уже
                 # известное на момент выгрузки выполнение, а не только то,
                 # что WMS увидит через будущие перемещения.
-                fulfilled_qty=row.get("fact", 0.0),
+                fulfilled_qty=max(
+                    row.get("fact", 0.0),
+                    local_received.get(
+                        (city_warehouses[row["city"]].id, nomenclature.id), 0.0
+                    )
+                    if nomenclature
+                    else 0.0,
+                ),
             )
         )
         created += 1
 
     return created, len(unmatched_barcodes)
+
+
+def _set_sync_setting(key, value):
+    setting = AppSetting.query.get(key)
+    if setting is None:
+        setting = AppSetting(key=key)
+        db.session.add(setting)
+    setting.value = (value or "")[:200]
+
+
+def _google_sync_status():
+    values = {
+        row.key: row.value
+        for row in AppSetting.query.filter(
+            AppSetting.key.in_((GOOGLE_SYNC_AT_KEY, GOOGLE_SYNC_ERROR_KEY, GOOGLE_SYNC_SHEETS_KEY))
+        ).all()
+    }
+    return {
+        "configured": google_sheets_configured(current_app),
+        "last_sync_at": values.get(GOOGLE_SYNC_AT_KEY),
+        "last_error": values.get(GOOGLE_SYNC_ERROR_KEY),
+        "sheet_names": values.get(GOOGLE_SYNC_SHEETS_KEY),
+    }
+
+
+def sync_google_plans_and_movements(uploaded_by_id=None):
+    """Читает все листы с признаком «Распределение» и публикует в
+    отдельный лист агрегированный факт перемещений из WMS."""
+    workbook, sheet_names = load_distribution_workbook(current_app)
+    summary = []
+    found_any = False
+    for marketplace in MARKETPLACES:
+        parsed = parse_plan_sheet(workbook, marketplace)
+        workbook.seek(0)
+        if parsed is None:
+            continue
+        found_any = True
+        created, unmatched = _apply_plan(marketplace, parsed, uploaded_by_id=uploaded_by_id)
+        summary.append(
+            f"{MARKETPLACE_LABELS[marketplace]}: {created} позиций, "
+            f"неизвестных штрихкодов {unmatched}"
+        )
+    if not found_any:
+        raise RuntimeError("В Google Таблице не найдено подходящих данных плана")
+
+    db.session.commit()
+    exported = write_wms_movement_sheet(current_app)
+    updated_cells = write_distribution_facts(current_app, workbook)
+    _set_sync_setting(GOOGLE_SYNC_AT_KEY, datetime.now().strftime("%d.%m.%Y %H:%M:%S"))
+    _set_sync_setting(GOOGLE_SYNC_ERROR_KEY, "")
+    _set_sync_setting(GOOGLE_SYNC_SHEETS_KEY, ", ".join(sheet_names))
+    db.session.commit()
+    return summary, sheet_names, exported, updated_cells
+
+
+def _run_google_sync_in_background(app):
+    try:
+        with app.app_context():
+            try:
+                sync_google_plans_and_movements()
+            except Exception as exc:  # noqa: BLE001
+                db.session.rollback()
+                _set_sync_setting(GOOGLE_SYNC_ERROR_KEY, str(exc))
+                db.session.commit()
+                app.logger.exception("Не удалось синхронизировать Google Таблицу")
+    finally:
+        _google_sync_lock.release()
+
+
+@bp.before_app_request
+def _schedule_google_sync():
+    """При активной работе WMS запускает обмен не чаще заданного интервала.
+    Запрос пользователя не ждет Google: синхронизация идет фоном."""
+    global _google_sync_started_at
+    if current_app.testing or not current_user.is_authenticated:
+        return None
+    if request.endpoint == "static" or not google_sheets_configured(current_app):
+        return None
+    interval = current_app.config.get("GOOGLE_SHEETS_SYNC_INTERVAL_SECONDS", 300)
+    now = time.monotonic()
+    if now - _google_sync_started_at < interval or not _google_sync_lock.acquire(False):
+        return None
+    _google_sync_started_at = now
+    threading.Thread(
+        target=_run_google_sync_in_background,
+        args=(current_app._get_current_object(),),
+        daemon=True,
+        name="wms-google-sheets-sync",
+    ).start()
+    return None
 
 
 @bp.route("/upload", methods=["GET", "POST"])
@@ -137,7 +251,7 @@ def upload():
         if parsed is None:
             continue
         found_any = True
-        created, unmatched = _apply_plan(marketplace, parsed)
+        created, unmatched = _apply_plan(marketplace, parsed, uploaded_by_id=current_user.id)
         summary.append(
             f"{MARKETPLACE_LABELS[marketplace]} («{parsed.sheet_name}»): "
             f"{created} позиций, городов {len(parsed.cities)}, "
@@ -154,6 +268,32 @@ def upload():
 
     db.session.commit()
     flash("План отгрузок обновлен: " + "; ".join(summary), "success")
+    return redirect(url_for("shipment_plan.dashboard"))
+
+
+@bp.route("/sync-google", methods=["POST"])
+def sync_google():
+    if not current_user.is_admin:
+        flash("Синхронизировать Google Таблицу может только администратор", "danger")
+        return redirect(url_for("shipment_plan.dashboard"))
+    try:
+        summary, sheet_names, exported, updated_cells = sync_google_plans_and_movements(
+            uploaded_by_id=current_user.id
+        )
+    except Exception as exc:  # noqa: BLE001
+        db.session.rollback()
+        _set_sync_setting(GOOGLE_SYNC_ERROR_KEY, str(exc))
+        db.session.commit()
+        flash(f"Не удалось синхронизировать Google Таблицу: {exc}", "danger")
+    else:
+        flash(
+            "Google Таблица синхронизирована: "
+            + "; ".join(summary)
+            + f"; выгружено строк WMS: {exported}; "
+            + f"обновлено ячеек «отгружено»: {updated_cells}; "
+            + f"листов: {len(sheet_names)}",
+            "success",
+        )
     return redirect(url_for("shipment_plan.dashboard"))
 
 
@@ -526,6 +666,7 @@ def dashboard():
         ozon_cities=ozon_cities,
         wb_cities=wb_cities,
         summary=summary,
+        google_sync=_google_sync_status(),
     )
 
 

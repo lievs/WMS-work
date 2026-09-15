@@ -66,6 +66,7 @@ def test_routing_recommends_city_with_demand(db, client_logged_in):
     assert "Содержимое короба" in html
     assert "Товар" in html
     assert "30 шт." not in html
+    assert html.index("Содержимое короба") < html.index("ОЗОН: Город")
 
 
 def test_routing_subtracts_already_committed_boxes(db, client_logged_in):

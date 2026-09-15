@@ -127,6 +127,18 @@ def _ensure_columns():
                         "[schema] users.invoice_receiving_view_allowed заполнен "
                         "для уже существующих пользователей"
                     )
+                if table.name == "users" and column.name == "movement_view_allowed":
+                    with db.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE users SET movement_view_allowed = 0 "
+                                "WHERE movement_view_allowed IS NULL"
+                            )
+                        )
+                    print(
+                        "[schema] users.movement_view_allowed заполнен "
+                        "для уже существующих пользователей"
+                    )
             except Exception as exc:  # noqa: BLE001
                 print(f"[schema] Не удалось добавить {table.name}.{column.name}: {exc}")
 

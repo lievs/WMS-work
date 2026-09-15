@@ -100,6 +100,32 @@ def test_invoice_receiving_view_permission_shows_foreign_invoice_read_only(db, c
     assert client.post(f"/receiving/{invoice.id}/send-to-recount").status_code == 404
 
 
+def test_movement_view_permission_shows_foreign_movements_read_only(db, client):
+    viewer = _user("movement-viewer")
+    author = _user("movement-author")
+    viewer.movement_view_allowed = True
+    warehouse = Warehouse(code="WH-MOVE-VIEW", name="Основной")
+    target = Warehouse(code="WH-MOVE-TARGET", name="Склад №2")
+    db.session.add_all([warehouse, target])
+    db.session.commit()
+    movement = MovementDocument(
+        number="MOVE-SHARED",
+        from_warehouse_id=warehouse.id,
+        to_warehouse_id=target.id,
+        created_by_id=author.id,
+    )
+    db.session.add(movement)
+    db.session.commit()
+
+    _login(client, viewer)
+    html = client.get("/movement/").get_data(as_text=True)
+    assert movement.number in html
+    detail = client.get(f"/movement/{movement.id}")
+    assert detail.status_code == 200
+    assert "Завершить перемещение" not in detail.get_data(as_text=True)
+    assert client.post(f"/movement/{movement.id}/complete").status_code == 404
+
+
 def test_receiving_offers_only_main_and_second_warehouse(db, client_logged_in):
     main = Warehouse(code="WH-001", name="Основной")
     second = Warehouse(code="WH-002", name="Склад №2")
@@ -149,9 +175,15 @@ def test_admin_can_grant_warehouse_mapping_permission_in_user_settings(
 
     client_logged_in.post(
         f"/users/{worker.id}/sections",
-        data={"mode": "full", "nomenclature_edit": "on", "warehouse_mapping": "on"},
+        data={
+            "mode": "full",
+            "nomenclature_edit": "on",
+            "warehouse_mapping": "on",
+            "movement_view": "on",
+        },
     )
     assert User.query.get(worker.id).warehouse_mapping_allowed is True
+    assert User.query.get(worker.id).movement_view_allowed is True
 
 
 def test_box_transfer_is_available_in_movements_and_shows_contents(db, client_logged_in):

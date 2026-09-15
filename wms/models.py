@@ -113,6 +113,9 @@ class User(UserMixin, db.Model):
     # приемщиков и заведующих складом; ручные приемки других сотрудников
     # этот флаг не открывает.
     invoice_receiving_view_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    # Право просматривать перемещения всех сотрудников. Изменение чужих
+    # документов этим правом не разрешается.
+    movement_view_allowed = db.Column(db.Boolean, nullable=False, default=False)
     # Версия входа используется для принудительного завершения сессий.
     # Она записывается в cookie при авторизации; увеличение значения делает
     # все ранее выданные cookie пользователя недействительными.
@@ -140,6 +143,9 @@ class User(UserMixin, db.Model):
 
     def can_view_invoice_receivings(self):
         return self.is_admin or self.invoice_receiving_view_allowed is True
+
+    def can_view_movements(self):
+        return self.is_admin or self.movement_view_allowed is True
 
     def has_section_access(self, section):
         """Раздел не из SECTIONS (например, служебные api/boxes/labels) не

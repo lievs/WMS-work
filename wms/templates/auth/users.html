@@ -65,6 +65,7 @@
                 {% if not u.nomenclature_edit_allowed %}<div class="text-muted small">ред. номенклатуры запрещено</div>{% endif %}
                 {% if u.warehouse_mapping_allowed %}<div class="text-muted small">сопоставление складов 1С разрешено</div>{% endif %}
                 {% if u.invoice_receiving_view_allowed %}<div class="text-muted small">видит все приемки по накладным</div>{% endif %}
+                {% if u.movement_view_allowed %}<div class="text-muted small">видит все перемещения</div>{% endif %}
 
                 <div class="modal fade" id="sectionsModal{{ u.id }}" tabindex="-1" aria-hidden="true">
                   <div class="modal-dialog">
@@ -111,6 +112,11 @@
                             <input class="form-check-input" type="checkbox" name="invoice_receiving_view" id="invoiceReceivingView{{ u.id }}" {% if u.invoice_receiving_view_allowed %}checked{% endif %}>
                             <label class="form-check-label" for="invoiceReceivingView{{ u.id }}">Просмотр всех приемок по накладным</label>
                             <div class="text-muted small">Выдайте это право приемщику и заведующему складом. Ручные приемки других сотрудников останутся скрыты.</div>
+                          </div>
+                          <div class="form-check mt-3">
+                            <input class="form-check-input" type="checkbox" name="movement_view" id="movementView{{ u.id }}" {% if u.movement_view_allowed %}checked{% endif %}>
+                            <label class="form-check-label" for="movementView{{ u.id }}">Просмотр всех перемещений</label>
+                            <div class="text-muted small">Пользователь увидит перемещения других сотрудников, но не сможет изменять или завершать их.</div>
                           </div>
                         </div>
                         <div class="modal-footer">

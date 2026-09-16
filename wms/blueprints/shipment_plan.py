@@ -66,6 +66,30 @@ def _get_or_create_city_warehouse(marketplace, city_name):
     return wh
 
 
+def _received_since_by_warehouse_and_item(cutoff):
+    """{(to_warehouse_id, nomenclature_id): кол-во} — уже ПОДТВЕРЖДЕННАЯ
+    приемка перемещением (received_at) не раньше cutoff. Нужно при
+    загрузке НОВОГО плана: _apply_plan полностью заменяет строки старой
+    версии плана (plan.lines.delete()), а вместе с ними и накопленный
+    fulfilled_qty — без этой подстраховки уже подтвержденное по
+    направлению до этой загрузки просто терялось бы (новая строка снова
+    начинала бы с нуля), если оно не попало в сам файл плана ("факт") или
+    в Google Таблицу (local_received)."""
+    rows = (
+        db.session.query(
+            MovementDocument.to_warehouse_id,
+            BoxItem.nomenclature_id,
+            func.sum(BoxItem.qty),
+        )
+        .join(MovementLine, MovementLine.document_id == MovementDocument.id)
+        .join(BoxItem, BoxItem.box_id == MovementLine.box_id)
+        .filter(MovementDocument.received_at.isnot(None), MovementDocument.received_at >= cutoff)
+        .group_by(MovementDocument.to_warehouse_id, BoxItem.nomenclature_id)
+        .all()
+    )
+    return {(wh_id, nom_id): qty or 0 for wh_id, nom_id, qty in rows}
+
+
 def _apply_plan(marketplace, parsed, uploaded_by_id=None):
     """Полностью заменяет строки плана этого маркетплейса новыми из файла."""
     plan = ShipmentPlan.query.filter_by(marketplace=marketplace).first()
@@ -89,7 +113,19 @@ def _apply_plan(marketplace, parsed, uploaded_by_id=None):
         n.barcode: n
         for n in Nomenclature.query.filter(Nomenclature.barcode.in_(barcodes)).all()
     }
-    local_received = received_wms_totals()
+    # Уже подтвержденное приемкой перемещением в WMS — подстраховка от
+    # потери fulfilled_qty при замене строк плана (plan.lines.delete() ниже).
+    # Если у плана известна "дата распределения" — считаем только движения
+    # не старше PERIOD_DAYS до нее (см. _received_since_by_warehouse_and_item):
+    # старая приемка, случившаяся до начала актуального периода, отношения
+    # к текущему плану не имеет и не должна в него засчитываться. Если дату
+    # из названия листа извлечь не удалось — берем весь накопленный факт
+    # без ограничения по периоду, как было до этого разделения.
+    if plan.period_start:
+        cutoff = datetime.combine(plan.period_start - timedelta(days=PERIOD_DAYS), datetime.min.time())
+        wms_received = _received_since_by_warehouse_and_item(cutoff)
+    else:
+        wms_received = received_wms_totals()
 
     # Один и тот же штрихкод изредка встречается в файле больше одного раза
     # для одного и того же города (дубль строки при ручном ведении таблицы) —
@@ -121,10 +157,12 @@ def _apply_plan(marketplace, parsed, uploaded_by_id=None):
                 planned_qty=row["qty"],
                 # Факт "отгружено / в пути" из самого файла плана — уже
                 # известное на момент выгрузки выполнение, а не только то,
-                # что WMS увидит через будущие перемещения.
+                # что WMS увидит через будущие перемещения. Плюс уже
+                # подтвержденная приемка перемещением в WMS (wms_received,
+                # см. выше) — иначе она терялась бы при замене строк плана.
                 fulfilled_qty=max(
                     row.get("fact", 0.0),
-                    local_received.get(
+                    wms_received.get(
                         (city_warehouses[row["city"]].id, nomenclature.id), 0.0
                     )
                     if nomenclature

@@ -187,9 +187,9 @@
                   title="{{ 'Заявка на МП создана ' + (d.marketplace_request_created_at|msk).strftime('%d.%m.%Y %H:%M') if d.marketplace_request_created_at else 'Отметить: заявка на маркетплейс создана' }}"
                   class="btn btn-sm btn-link p-0 text-primary" style="font-size:1.15rem; line-height:1; text-decoration:none;">{{ '✔' if d.marketplace_request_created_at else '☐' }}</button>
           </td>
-          <td style="min-width:140px">
+          <td style="min-width:100px">
             <form method="post" action="{{ url_for('movement.update_marketplace_request_number', doc_id=d.id) }}" class="d-flex gap-1">
-              <input type="text" name="marketplace_request_number" value="{{ d.marketplace_request_number or '' }}" class="form-control form-control-sm" placeholder="№ заявки">
+              <input type="text" name="marketplace_request_number" value="{{ d.marketplace_request_number or '' }}" class="form-control form-control-sm" style="width:100px" placeholder="№ заявки">
               <button type="submit" class="btn btn-sm btn-outline-secondary">✓</button>
             </form>
           </td>

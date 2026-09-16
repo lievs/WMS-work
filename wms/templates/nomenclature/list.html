@@ -8,7 +8,15 @@
     <a class="btn btn-outline-secondary" href="{{ url_for('nomenclature.download_template') }}">📄 Скачать шаблон</a>
     <a class="btn btn-outline-secondary" href="{{ url_for('nomenclature.import_nomenclature') }}">📥 Импорт из Excel</a>
     {% endif %}
-    <a class="btn btn-outline-secondary" href="{{ url_for('nomenclature.export_all') }}">📤 Экспорт в Excel</a>
+    <form method="get" action="{{ url_for('nomenclature.export_all') }}" class="d-flex gap-1">
+      <select name="warehouse_id" class="form-select form-select-sm" title="Остаток по складу">
+        <option value="">Остаток: все склады</option>
+        {% for wh in stock_warehouses %}
+        <option value="{{ wh.id }}">Остаток: {{ wh.name }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-outline-secondary">📤 Экспорт в Excel</button>
+    </form>
     {% if current_user.is_admin %}
     <form method="post" action="{{ url_for('nomenclature.clear_nomenclature') }}" class="d-inline" onsubmit="return confirm('Удалить всю номенклатуру, у которой нет остатков и документов? Товары, уже использованные в реальных данных, не тронет. Действие необратимо.');">
       <button type="submit" class="btn btn-outline-danger">🗑 Очистить номенклатуру</button>
@@ -69,7 +77,9 @@
             <th>Штрихкод</th><th>Наименование</th><th>Размер</th>
             <th>Артикул</th>
             <th>Ед.</th>
-            <th>Вид</th><th>Остаток</th><th></th>
+            <th>Вид</th>
+            {% for wh in stock_warehouses %}<th>{{ wh.name }}</th>{% endfor %}
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -112,11 +122,13 @@
             {% else %}
             <td>{{ item.category.name if item.category else '—' }}</td>
             {% endif %}
-            <td><a href="{{ url_for('nomenclature.locate', barcode=item.barcode) }}">{{ '%g' % stock_by_item.get(item.id, 0) }} {{ item.unit }}</a></td>
+            {% for wh in stock_warehouses %}
+            <td><a href="{{ url_for('nomenclature.locate', barcode=item.barcode) }}">{{ '%g' % stock_by_item_warehouse.get((item.id, wh.id), 0) }} {{ item.unit }}</a></td>
+            {% endfor %}
             <td><a target="_blank" href="{{ url_for('labels.item_label', item_id=item.id) }}">🖨 Этикетка</a></td>
           </tr>
         {% else %}
-          <tr><td colspan="8" class="text-muted">Ничего не найдено</td></tr>
+          <tr><td colspan="{{ 7 + stock_warehouses|length }}" class="text-muted">Ничего не найдено</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -169,8 +181,9 @@
             <div class="small text-muted mt-1">Вид: {{ item.category.name if item.category else '—' }}</div>
             {% endif %}
             <div class="small mt-1">
-              Остаток:
-              <a href="{{ url_for('nomenclature.locate', barcode=item.barcode) }}">{{ '%g' % stock_by_item.get(item.id, 0) }} {{ item.unit }}</a>
+              {% for wh in stock_warehouses %}
+              {{ wh.name }}: <a href="{{ url_for('nomenclature.locate', barcode=item.barcode) }}">{{ '%g' % stock_by_item_warehouse.get((item.id, wh.id), 0) }} {{ item.unit }}</a>{% if not loop.last %} · {% endif %}
+              {% endfor %}
             </div>
           </div>
         {% else %}

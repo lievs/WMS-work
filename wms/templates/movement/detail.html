@@ -16,6 +16,11 @@
   </div>
   <div>
     <a class="btn btn-outline-secondary" href="{{ url_for('movement.export_document', doc_id=doc.id) }}">📤 Экспорт в Excel</a>
+    {% if doc.status == 'completed' and doc.to_warehouse.marketplace == 'ozon' %}
+    <a class="btn btn-outline-secondary" href="{{ url_for('marketplace_export.ozon_package_composition', doc_id=doc.id) }}">📦 Состав ГМ для Ozon</a>
+    {% elif doc.status == 'completed' and doc.to_warehouse.marketplace == 'wb' %}
+    <a class="btn btn-outline-secondary" href="{{ url_for('marketplace_export.wb_package_composition', doc_id=doc.id) }}">📦 Состав для WB</a>
+    {% endif %}
     {% if can_manage_document and doc.status == 'draft' %}
     <form method="post" action="{{ url_for('movement.complete', doc_id=doc.id) }}" class="d-inline">
       <button type="submit" class="btn btn-success">✅ Завершить перемещение</button>

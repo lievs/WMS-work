@@ -1016,3 +1016,21 @@ class SupplierReturn(db.Model):
     nomenclature = db.relationship("Nomenclature")
     created_by = db.relationship("User")
     receiving_document = db.relationship("ReceivingDocument")
+
+
+class OzonArticleMapping(db.Model):
+    """Сопоставление штрихкода товара с артикулом, под которым он заведен в
+    личном кабинете Ozon — нужно для выгрузки «Состав грузовых мест» (см.
+    marketplace_export.export_ozon_package_composition): в файле для Ozon
+    колонка «ШК товара» — это наш обычный Nomenclature.barcode, а вот
+    «Артикул товара» у Ozon — отдельная строка, которая с нашим
+    Nomenclature.sku не совпадает. Загружается отдельным файлом
+    (см. marketplace_export.upload_ozon_mapping) — просто две колонки,
+    штрихкод и артикул, без заголовка."""
+
+    __tablename__ = "ozon_article_mappings"
+
+    id = db.Column(db.Integer, primary_key=True)
+    barcode = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    article = db.Column(db.String(200), nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

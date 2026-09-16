@@ -460,3 +460,69 @@ def export_shipped_report_to_excel(rows) -> bytes:
 
 def timestamp_for_filename() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+# Заголовки — дословно как в официальных шаблонах маркетплейсов (см.
+# marketplace_export.py), чтобы файл принимался без ручной правки колонок.
+OZON_PACKAGE_HEADERS = [
+    "ШК товара",
+    "Артикул товара",
+    "Кол-во товаров",
+    "Зона размещения",
+    "Срок годности ДО в формате YYYY-MM-DD (не более 1 СГ на 1 SKU в 1 ГМ)",
+    "ШК ГМ",
+    "Тип ГМ (не обязательно)",
+]
+
+WB_PACKAGE_HEADERS = [
+    "Баркод товара",
+    "Кол-во товаров",
+    "ШК короба",
+    "Срок годности",
+    "ШК короба для печати в стороннем сервисе",
+]
+
+
+def export_ozon_package_composition(rows) -> bytes:
+    """rows — [{"barcode", "article", "qty", "cargo_barcode"}], одна строка
+    на товар в одном грузовом месте (см.
+    marketplace_export.ozon_package_composition). Срок годности и зона
+    размещения WMS не отслеживает — оставляются пустыми, заполняются
+    вручную при необходимости, как и предусматривает сам шаблон Ozon."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Состав ГМ поставки"
+    _style_header(ws, OZON_PACKAGE_HEADERS)
+
+    for row in rows:
+        ws.append(
+            [
+                row["barcode"],
+                row["article"],
+                row["qty"],
+                "",
+                "",
+                row["cargo_barcode"],
+                "Коробка",
+            ]
+        )
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def export_wb_package_composition(rows) -> bytes:
+    """rows — [{"barcode", "qty", "box_barcode"}], одна строка на товар в
+    одном коробе (см. marketplace_export.wb_package_composition)."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    _style_header(ws, WB_PACKAGE_HEADERS)
+
+    for row in rows:
+        ws.append([row["barcode"], row["qty"], row["box_barcode"], "", ""])
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()

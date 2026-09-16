@@ -291,6 +291,7 @@ def create_app(config_class=Config):
     from .blueprints.shipment_plan import bp as shipment_plan_bp
     from .blueprints.integration_1c import bp as integration_1c_bp
     from .blueprints.onboarding import bp as onboarding_bp
+    from .blueprints.marketplace_export import bp as marketplace_export_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
@@ -308,6 +309,7 @@ def create_app(config_class=Config):
     app.register_blueprint(shipment_plan_bp, url_prefix="/shipment-plan")
     app.register_blueprint(integration_1c_bp, url_prefix="/integrations/1c")
     app.register_blueprint(onboarding_bp, url_prefix="/onboarding")
+    app.register_blueprint(marketplace_export_bp, url_prefix="/marketplace-export")
 
     with app.app_context():
         from . import models  # noqa: F401

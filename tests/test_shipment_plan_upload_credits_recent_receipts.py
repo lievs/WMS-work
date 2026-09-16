@@ -3,8 +3,10 @@
 ними терялся бы и накопленный fulfilled_qty, если подтвержденная приемка
 по направлению случилась ДО этой загрузки и не попала в сам файл плана
 ("факт") или в Google Таблицу. Поэтому при загрузке дополнительно
-учитывается уже принятое перемещением (received_at) за период "дата
-распределения минус PERIOD_DAYS (14)" — см.
+учитывается уже принятое перемещением (received_at) в интервале действия
+плана: с самой "даты распределения" и до дедлайна +PERIOD_DAYS (14) — тот
+же интервал, что и в shipment_plan._pace_analysis. Приемка до начала
+периода или после дедлайна к текущему плану отношения не имеет — см.
 shipment_plan._received_since_by_warehouse_and_item."""
 
 import io
@@ -46,7 +48,15 @@ def _make_received_movement(sender, city, item, qty, box_number, received_at):
     db.session.commit()
 
 
-def test_upload_credits_recent_receipt_into_fulfilled_qty(db, client_logged_in):
+def _upload(client, sheet_name, city, barcode, qty):
+    return client.post(
+        "/shipment-plan/upload",
+        data={"file": (_plan_file(sheet_name, city, barcode, qty), "plan.xlsx")},
+        content_type="multipart/form-data",
+    )
+
+
+def test_upload_credits_receipt_within_period_window_into_fulfilled_qty(db, client_logged_in):
     sender = Warehouse(code="WH-UPC1", name="Склад-отправитель")
     db.session.add(sender)
     db.session.commit()
@@ -63,11 +73,7 @@ def test_upload_credits_recent_receipt_into_fulfilled_qty(db, client_logged_in):
     # города создает сама загрузка, короб примем на склад ПОСЛЕ первой
     # (пустой по факту) загрузки, затем перезагрузим план и проверим, что
     # повторная замена строк не стирает уже подтвержденное.
-    resp = client_logged_in.post(
-        "/shipment-plan/upload",
-        data={"file": (_plan_file(sheet_name, "Город", item.barcode, 30), "plan.xlsx")},
-        content_type="multipart/form-data",
-    )
+    resp = _upload(client_logged_in, sheet_name, "Город", item.barcode, 30)
     assert resp.status_code == 302
 
     city = Warehouse.query.filter_by(marketplace="ozon", marketplace_city="Город").first()
@@ -75,21 +81,18 @@ def test_upload_credits_recent_receipt_into_fulfilled_qty(db, client_logged_in):
     line = ShipmentPlanLine.query.filter_by(warehouse_id=city.id, nomenclature_id=item.id).first()
     assert line.fulfilled_qty == 0
 
-    received_at = datetime.combine(period_start, datetime.min.time()) - timedelta(days=1)
+    # Приемка внутри интервала действия плана (дата распределения .. +14 дней).
+    received_at = datetime.combine(period_start, datetime.min.time()) + timedelta(days=1)
     _make_received_movement(sender, city, item, qty=12, box_number="BOX-UPC101", received_at=received_at)
 
-    resp = client_logged_in.post(
-        "/shipment-plan/upload",
-        data={"file": (_plan_file(sheet_name, "Город", item.barcode, 30), "plan.xlsx")},
-        content_type="multipart/form-data",
-    )
+    resp = _upload(client_logged_in, sheet_name, "Город", item.barcode, 30)
     assert resp.status_code == 302
 
     line = ShipmentPlanLine.query.filter_by(warehouse_id=city.id, nomenclature_id=item.id).first()
     assert line.fulfilled_qty == 12
 
 
-def test_upload_ignores_receipts_older_than_period_window(db, client_logged_in):
+def test_upload_ignores_receipts_before_period_start(db, client_logged_in):
     sender = Warehouse(code="WH-UPC2", name="Склад-отправитель")
     db.session.add(sender)
     db.session.commit()
@@ -100,23 +103,41 @@ def test_upload_ignores_receipts_older_than_period_window(db, client_logged_in):
     period_start = date.today() - timedelta(days=2)
     sheet_name = f"Распределение ОЗОН ФБС от {period_start.strftime('%d.%m')}"
 
-    client_logged_in.post(
-        "/shipment-plan/upload",
-        data={"file": (_plan_file(sheet_name, "Город2", item.barcode, 30), "plan.xlsx")},
-        content_type="multipart/form-data",
-    )
+    _upload(client_logged_in, sheet_name, "Город2", item.barcode, 30)
     city = Warehouse.query.filter_by(marketplace="ozon", marketplace_city="Город2").first()
 
-    # Принято намного раньше окна (дата распределения - 14 дней) - не
-    # должно засчитаться, это старая, не относящаяся к периоду приемка.
-    old_received_at = datetime.combine(period_start, datetime.min.time()) - timedelta(days=30)
+    # Принято до начала периода плана — не должно засчитаться, это старая,
+    # не относящаяся к текущему периоду приемка.
+    old_received_at = datetime.combine(period_start, datetime.min.time()) - timedelta(days=5)
     _make_received_movement(sender, city, item, qty=99, box_number="BOX-UPC201", received_at=old_received_at)
 
-    client_logged_in.post(
-        "/shipment-plan/upload",
-        data={"file": (_plan_file(sheet_name, "Город2", item.barcode, 30), "plan.xlsx")},
-        content_type="multipart/form-data",
-    )
+    _upload(client_logged_in, sheet_name, "Город2", item.barcode, 30)
+
+    line = ShipmentPlanLine.query.filter_by(warehouse_id=city.id, nomenclature_id=item.id).first()
+    assert line.fulfilled_qty == 0
+
+
+def test_upload_ignores_receipts_after_period_deadline(db, client_logged_in):
+    sender = Warehouse(code="WH-UPC3", name="Склад-отправитель")
+    db.session.add(sender)
+    db.session.commit()
+    item = Nomenclature(sku="SKU-UPC3", barcode="7770100003", name="Товар", unit="шт")
+    db.session.add(item)
+    db.session.commit()
+
+    # Период уже давно закрыт (дедлайн = дата распределения + 14 дней).
+    period_start = date.today() - timedelta(days=20)
+    sheet_name = f"Распределение ОЗОН ФБС от {period_start.strftime('%d.%m')}"
+
+    _upload(client_logged_in, sheet_name, "Город3", item.barcode, 30)
+    city = Warehouse.query.filter_by(marketplace="ozon", marketplace_city="Город3").first()
+
+    # Принято уже после дедлайна этого периода (условно — по другому,
+    # более позднему поводу) — к этому плану отношения не имеет.
+    late_received_at = datetime.combine(period_start, datetime.min.time()) + timedelta(days=20)
+    _make_received_movement(sender, city, item, qty=77, box_number="BOX-UPC301", received_at=late_received_at)
+
+    _upload(client_logged_in, sheet_name, "Город3", item.barcode, 30)
 
     line = ShipmentPlanLine.query.filter_by(warehouse_id=city.id, nomenclature_id=item.id).first()
     assert line.fulfilled_qty == 0

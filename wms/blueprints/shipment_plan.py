@@ -66,15 +66,18 @@ def _get_or_create_city_warehouse(marketplace, city_name):
     return wh
 
 
-def _received_since_by_warehouse_and_item(cutoff):
+def _received_since_by_warehouse_and_item(window_start, window_end):
     """{(to_warehouse_id, nomenclature_id): кол-во} — уже ПОДТВЕРЖДЕННАЯ
-    приемка перемещением (received_at) не раньше cutoff. Нужно при
-    загрузке НОВОГО плана: _apply_plan полностью заменяет строки старой
-    версии плана (plan.lines.delete()), а вместе с ними и накопленный
-    fulfilled_qty — без этой подстраховки уже подтвержденное по
-    направлению до этой загрузки просто терялось бы (новая строка снова
+    приемка перемещением (received_at) в интервале действия плана
+    [window_start, window_end] — "дата распределения" .. +PERIOD_DAYS.
+    Нужно при загрузке НОВОГО плана: _apply_plan полностью заменяет строки
+    старой версии плана (plan.lines.delete()), а вместе с ними и
+    накопленный fulfilled_qty — без этой подстраховки уже подтвержденное
+    по направлению за этот период просто терялось бы (новая строка снова
     начинала бы с нуля), если оно не попало в сам файл плана ("факт") или
-    в Google Таблицу (local_received)."""
+    в Google Таблицу (local_received). Приемка за пределами интервала (до
+    начала периода или после дедлайна +PERIOD_DAYS) к текущему плану
+    отношения не имеет и не учитывается."""
     rows = (
         db.session.query(
             MovementDocument.to_warehouse_id,
@@ -83,7 +86,11 @@ def _received_since_by_warehouse_and_item(cutoff):
         )
         .join(MovementLine, MovementLine.document_id == MovementDocument.id)
         .join(BoxItem, BoxItem.box_id == MovementLine.box_id)
-        .filter(MovementDocument.received_at.isnot(None), MovementDocument.received_at >= cutoff)
+        .filter(
+            MovementDocument.received_at.isnot(None),
+            MovementDocument.received_at >= window_start,
+            MovementDocument.received_at <= window_end,
+        )
         .group_by(MovementDocument.to_warehouse_id, BoxItem.nomenclature_id)
         .all()
     )
@@ -116,14 +123,18 @@ def _apply_plan(marketplace, parsed, uploaded_by_id=None):
     # Уже подтвержденное приемкой перемещением в WMS — подстраховка от
     # потери fulfilled_qty при замене строк плана (plan.lines.delete() ниже).
     # Если у плана известна "дата распределения" — считаем только движения
-    # не старше PERIOD_DAYS до нее (см. _received_since_by_warehouse_and_item):
-    # старая приемка, случившаяся до начала актуального периода, отношения
-    # к текущему плану не имеет и не должна в него засчитываться. Если дату
-    # из названия листа извлечь не удалось — берем весь накопленный факт
-    # без ограничения по периоду, как было до этого разделения.
+    # с датой приемки в интервале действия плана: с самой даты распределения
+    # и до дедлайна +PERIOD_DAYS (см. _received_since_by_warehouse_and_item и
+    # _pace_analysis, где используется тот же дедлайн). Приемка до начала
+    # периода или после дедлайна к текущему плану отношения не имеет. Если
+    # дату из названия листа извлечь не удалось — берем весь накопленный
+    # факт без ограничения по периоду, как было до этого разделения.
     if plan.period_start:
-        cutoff = datetime.combine(plan.period_start - timedelta(days=PERIOD_DAYS), datetime.min.time())
-        wms_received = _received_since_by_warehouse_and_item(cutoff)
+        window_start = datetime.combine(plan.period_start, datetime.min.time())
+        window_end = datetime.combine(
+            plan.period_start + timedelta(days=PERIOD_DAYS), datetime.max.time()
+        )
+        wms_received = _received_since_by_warehouse_and_item(window_start, window_end)
     else:
         wms_received = received_wms_totals()
 

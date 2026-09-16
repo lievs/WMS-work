@@ -10,7 +10,7 @@
   </div>
 </div>
 
-<form method="get" class="d-flex flex-wrap gap-3 mb-3">
+<form method="get" class="d-flex flex-wrap align-items-center gap-3 mb-3">
   <div class="form-check">
     <input type="checkbox" name="unfinished" class="form-check-input" id="filterUnfinished" onchange="this.form.submit()" {% if unfinished_only %}checked{% endif %}>
     <label class="form-check-label" for="filterUnfinished">Показывать только незавершенные</label>
@@ -18,6 +18,16 @@
   <div class="form-check">
     <input type="checkbox" name="invoice_only" class="form-check-input" id="filterInvoiceOnly" onchange="this.form.submit()" {% if invoice_only %}checked{% endif %}>
     <label class="form-check-label" for="filterInvoiceOnly">Приемка по накладным</label>
+  </div>
+  <select name="warehouse_id" class="form-select form-select-sm" style="max-width:220px" onchange="this.form.submit()">
+    <option value="">Все склады</option>
+    {% for wh in warehouses %}
+    <option value="{{ wh.id }}" {% if warehouse_id == wh.id %}selected{% endif %}>{{ wh.name }}</option>
+    {% endfor %}
+  </select>
+  <div class="d-flex gap-1">
+    <input type="text" name="supplier" class="form-control form-control-sm" style="max-width:220px" placeholder="Поставщик" value="{{ supplier_q }}">
+    <button type="submit" class="btn btn-sm btn-outline-primary">Найти</button>
   </div>
 </form>
 

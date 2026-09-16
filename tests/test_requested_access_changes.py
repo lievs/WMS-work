@@ -7,6 +7,7 @@ from wms.models import (
     Nomenclature,
     PlacementDocument,
     ReceivingDocument,
+    ReceivingLine,
     User,
     Warehouse,
 )
@@ -124,6 +125,11 @@ def test_invoice_receiving_view_permission_shows_foreign_invoice_read_only(db, c
     )
     db.session.add_all([invoice, manual])
     db.session.commit()
+    item = Nomenclature(sku="SKU-INV-VIEW", barcode="77706000001", name="Товар", unit="шт")
+    db.session.add(item)
+    db.session.commit()
+    db.session.add(ReceivingLine(document_id=invoice.id, nomenclature_id=item.id, qty=5))
+    db.session.commit()
 
     _login(client, receiver)
     html = client.get("/receiving/").get_data(as_text=True)
@@ -131,8 +137,15 @@ def test_invoice_receiving_view_permission_shows_foreign_invoice_read_only(db, c
     assert manual.number not in html
     assert client.get(f"/receiving/{invoice.id}").status_code == 200
     assert client.get(f"/receiving/{manual.id}").status_code == 404
-    # Право только на просмотр: менять чужую приемку нельзя.
-    assert client.post(f"/receiving/{invoice.id}/send-to-recount").status_code == 404
+    # Право "видит все приемки по накладным" дается приемщику/зав. складом
+    # именно чтобы они ВЕЛИ чужие приемки по накладным целиком, а не только
+    # смотрели — иначе, например, "Отправить на пересчет" падало бы в 404
+    # для всех, кроме автора и админа (баг, а не намеренное ограничение).
+    resp = client.post(f"/receiving/{invoice.id}/send-to-recount", follow_redirects=True)
+    assert resp.status_code == 200
+    assert ReceivingDocument.query.get(invoice.id).status == "recounting"
+    # Приемка без загруженной накладной (manual) по-прежнему недоступна.
+    assert client.post(f"/receiving/{manual.id}/send-to-recount").status_code == 404
 
 
 def test_movement_view_permission_shows_foreign_movements_read_only(db, client):

@@ -46,11 +46,15 @@ def _restrict_document_access():
         return None
 
     doc = ReceivingDocument.query.get_or_404(document_id)
-    if (
-        request.method == "GET"
-        and current_user.can_view_invoice_receivings()
-        and doc.is_from_invoice_import()
-    ):
+    if current_user.can_view_invoice_receivings() and doc.is_from_invoice_import():
+        # Раньше это правило действовало только на GET — право "видит все
+        # приемки по накладным" выдается приемщику/зав. складом именно
+        # чтобы они ВЕЛИ чужие приемки по накладным целиком (отправка на
+        # пересчет/разбраковку, ввод количества и т.п.), а не только
+        # смотрели на них. Без этого POST send-to-recount и все остальные
+        # изменяющие действия на чужой приемке по накладной падали в 404
+        # для всех, кроме автора и админа (см. get_owned_or_404 ниже) —
+        # даже у тех, у кого есть это право.
         return None
     get_owned_or_404(ReceivingDocument, document_id)
     return None
@@ -124,12 +128,18 @@ def list_documents():
     # от ручного создания, где поставщик — просто свободный текст.
     unfinished_only = request.args.get("unfinished") == "on"
     invoice_only = request.args.get("invoice_only") == "on"
+    supplier_q = request.args.get("supplier", "").strip()
+    warehouse_id = request.args.get("warehouse_id", type=int)
 
     query = _visible_receiving_query()
     if unfinished_only:
         query = query.filter(ReceivingDocument.status != "completed")
     if invoice_only:
         query = query.filter(ReceivingDocument.supplier_id.isnot(None))
+    if supplier_q:
+        query = query.filter(ReceivingDocument.supplier.ilike(f"%{supplier_q}%"))
+    if warehouse_id:
+        query = query.filter(ReceivingDocument.warehouse_id == warehouse_id)
 
     documents = query.order_by(ReceivingDocument.created_at.desc()).all()
     return render_template(
@@ -137,6 +147,9 @@ def list_documents():
         documents=documents,
         unfinished_only=unfinished_only,
         invoice_only=invoice_only,
+        supplier_q=supplier_q,
+        warehouse_id=warehouse_id,
+        warehouses=_receiving_warehouses(),
     )
 
 

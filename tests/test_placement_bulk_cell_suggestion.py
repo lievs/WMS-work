@@ -7,7 +7,7 @@
 
 from wms.blueprints.placement import suggest_cell
 from wms.extensions import db
-from wms.models import CELL_CAPACITY, Box, BoxItem, Cell, Nomenclature, Warehouse
+from wms.models import CELL_CAPACITY, Box, BoxItem, Cell, Nomenclature, Warehouse, Zone
 
 
 def _make_warehouse(suffix):
@@ -24,8 +24,8 @@ def _make_item(suffix):
     return item
 
 
-def _make_cell(warehouse, code):
-    cell = Cell(warehouse_id=warehouse.id, code=code)
+def _make_cell(warehouse, code, zone=None):
+    cell = Cell(warehouse_id=warehouse.id, code=code, zone_id=zone.id if zone else None)
     db.session.add(cell)
     db.session.commit()
     return cell
@@ -121,3 +121,33 @@ def test_direct_match_still_wins_even_for_bulk_item(db):
     assert suggestion is not None
     assert suggestion["cell"].id == started_cell.id
     assert "уже есть такой же товар" in suggestion["reason"]
+
+
+def test_bulk_empty_cell_reason_wins_over_row_match_phrasing(db):
+    """Регрессия: пустая ячейка в том же ряду, что и заполненная под
+    завязку ячейка с этим же ходовым товаром, выбирается из-за bulk-логики
+    (см. mix_penalty) — причина должна отражать именно это, а не
+    формально верное, но неинформативное "товар уже есть в этом ряду"."""
+    warehouse = _make_warehouse("5")
+    bulk_item = _make_item("5")
+    other_item = _make_item("5b")
+    zone = Zone(warehouse_id=warehouse.id, code="A")
+    db.session.add(zone)
+    db.session.commit()
+
+    full_cell = _make_cell(warehouse, "A-01", zone=zone)
+    empty_cell = _make_cell(warehouse, "A-02", zone=zone)
+    mixed_cell = _make_cell(warehouse, "A-03", zone=zone)
+
+    for i in range(CELL_CAPACITY):
+        _make_box(warehouse, bulk_item, f"BOX-BULK-FULL5-{i}", cell=full_cell)
+    _make_box(warehouse, other_item, "BOX-BULK-MIXED5", cell=mixed_cell)
+    _make_box(warehouse, bulk_item, "BOX-BULK-STOCK5")  # неразмещенный — для is_bulk
+
+    target_box = _make_box(warehouse, bulk_item, "BOX-BULK-TARGET5")
+
+    suggestion = suggest_cell(warehouse.id, target_box)
+
+    assert suggestion is not None
+    assert suggestion["cell"].id == empty_cell.id
+    assert "отдельную ячейку" in suggestion["reason"]

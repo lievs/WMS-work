@@ -157,10 +157,13 @@ def suggest_cell(warehouse_id, box):
     _, cell, direct_match, row_match, count = best
     if direct_match:
         reason = f"в ячейке уже есть такой же товар ({count} короб. в ячейке)"
+    elif bulk_own and count == 0:
+        # Приоритетнее row_match: пустая ячейка могла быть выбрана среди
+        # нескольких row_match именно из-за bulk-логики (см. mix_penalty
+        # выше) — это и есть настоящая причина выбора, а не совпадение ряда.
+        reason = "этого товара много на складе — заводим под него отдельную ячейку"
     elif row_match:
         reason = f"такой товар уже есть в этом ряду ({cell.zone.code})"
-    elif bulk_own and count == 0:
-        reason = "этого товара много на складе — заводим под него отдельную ячейку"
     elif count > 0:
         reason = "ячейка уже частично заполнена"
     else:

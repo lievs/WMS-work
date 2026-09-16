@@ -138,11 +138,21 @@ def import_nomenclature_from_excel(file_stream, db, Nomenclature) -> ImportResul
     return result
 
 
-def export_nomenclature_to_excel(items) -> bytes:
+NOMENCLATURE_EXPORT_HEADERS = NOMENCLATURE_HEADERS + ["Остаток"]
+
+
+def export_nomenclature_to_excel(items, stock_by_item=None) -> bytes:
+    """stock_by_item — {nomenclature_id: кол-во} (см.
+    nomenclature._stock_by_item) — сумма упакованного в короба и
+    неразмещенного остатка. Отдельные от NOMENCLATURE_HEADERS заголовки,
+    т.к. эта же константа используется и для шаблона ЗАГРУЗКИ номенклатуры
+    (build_nomenclature_template), где колонки остатка быть не должно —
+    остаток не то, что можно "загрузить" при создании товара."""
+    stock_by_item = stock_by_item or {}
     wb = Workbook()
     ws = wb.active
     ws.title = "Номенклатура"
-    _style_header(ws, NOMENCLATURE_HEADERS)
+    _style_header(ws, NOMENCLATURE_EXPORT_HEADERS)
     for item in items:
         ws.append(
             [
@@ -153,6 +163,7 @@ def export_nomenclature_to_excel(items) -> bytes:
                 item.description or "",
                 item.norm_minutes or "",
                 item.sku,
+                stock_by_item.get(item.id, 0),
             ]
         )
     buffer = io.BytesIO()

@@ -125,6 +125,26 @@ def locate():
 NOMENCLATURE_PAGE_SIZE = 100
 
 
+def _stock_by_item(item_ids=None):
+    """Остаток по товару — сумма того, что упаковано в короба (в любом
+    статусе/складе), плюс неразмещенный остаток. item_ids=None — по всему
+    каталогу сразу (см. export_all), иначе только по перечисленным
+    (список/страница — не тянуть остаток по всему каталогу лишний раз)."""
+    stock_by_item = {}
+    box_query = db.session.query(BoxItem.nomenclature_id, db.func.sum(BoxItem.qty))
+    unplaced_query = db.session.query(
+        UnplacedStock.nomenclature_id, db.func.sum(UnplacedStock.qty)
+    ).filter(UnplacedStock.qty > 0)
+    if item_ids is not None:
+        box_query = box_query.filter(BoxItem.nomenclature_id.in_(item_ids))
+        unplaced_query = unplaced_query.filter(UnplacedStock.nomenclature_id.in_(item_ids))
+    for nid, qty in box_query.group_by(BoxItem.nomenclature_id).all():
+        stock_by_item[nid] = stock_by_item.get(nid, 0) + qty
+    for nid, qty in unplaced_query.group_by(UnplacedStock.nomenclature_id).all():
+        stock_by_item[nid] = stock_by_item.get(nid, 0) + qty
+    return stock_by_item
+
+
 @bp.route("/")
 def list_nomenclature():
     """Каталог может разрастись до тысяч позиций (реальный ассортимент
@@ -153,27 +173,10 @@ def list_nomenclature():
     )
     categories = ProductCategory.query.order_by(ProductCategory.name).all()
 
-    # Остаток по товару — сумма того, что упаковано в короба (в любом
-    # статусе/складе), плюс неразмещенный остаток. Считаем только для
-    # позиций текущей страницы, одним групповым запросом на каждый
-    # источник — иначе на 100 строк было бы по 2 запроса на каждую.
+    # Считаем только для позиций текущей страницы, чтобы не тянуть остаток
+    # по всему каталогу на каждую загрузку страницы.
     item_ids = [item.id for item in pagination.items]
-    stock_by_item = {}
-    if item_ids:
-        for nid, qty in (
-            db.session.query(BoxItem.nomenclature_id, db.func.sum(BoxItem.qty))
-            .filter(BoxItem.nomenclature_id.in_(item_ids))
-            .group_by(BoxItem.nomenclature_id)
-            .all()
-        ):
-            stock_by_item[nid] = stock_by_item.get(nid, 0) + qty
-        for nid, qty in (
-            db.session.query(UnplacedStock.nomenclature_id, db.func.sum(UnplacedStock.qty))
-            .filter(UnplacedStock.nomenclature_id.in_(item_ids), UnplacedStock.qty > 0)
-            .group_by(UnplacedStock.nomenclature_id)
-            .all()
-        ):
-            stock_by_item[nid] = stock_by_item.get(nid, 0) + qty
+    stock_by_item = _stock_by_item(item_ids) if item_ids else {}
 
     return render_template(
         "nomenclature/list.html",
@@ -320,7 +323,8 @@ def download_template():
 @bp.route("/export.xlsx")
 def export_all():
     items = Nomenclature.query.order_by(Nomenclature.name).all()
-    data = export_nomenclature_to_excel(items)
+    stock_by_item = _stock_by_item()
+    data = export_nomenclature_to_excel(items, stock_by_item)
     fname = f"nomenclature_{timestamp_for_filename()}.xlsx"
     return Response(
         data,

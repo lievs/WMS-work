@@ -24,6 +24,8 @@
 заполняется вручную при необходимости, как и предусмотрено самими
 шаблонами."""
 
+import re
+
 from flask import Blueprint, Response, abort, flash, redirect, render_template, request, url_for
 from flask_login import current_user
 from openpyxl import load_workbook
@@ -60,6 +62,9 @@ def _cell_to_barcode(value):
     return str(value).strip()
 
 
+_BARCODE_RE = re.compile(r"^\d{6,20}$")
+
+
 @bp.route("/ozon-mapping", methods=["GET", "POST"])
 def ozon_mapping():
     if not current_user.is_admin:
@@ -75,12 +80,21 @@ def ozon_mapping():
         workbook = load_workbook(file, read_only=True, data_only=True)
         worksheet = workbook.active
         updated = 0
+        skipped_examples = []
         for row in worksheet.iter_rows(values_only=True):
             if not row or row[0] is None:
                 continue
             barcode = _cell_to_barcode(row[0])
             article = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
-            if not barcode or not article:
+            # Первая колонка файла сопоставления — именно штрихкод (число из
+            # 6+ цифр), а не название/артикул. Если это не похоже на
+            # штрихкод — почти наверняка загружен не тот файл (например,
+            # готовая "Заявка на поставку" вместо исходного списка
+            # штрихкод-артикул) — не создаем мусорную запись, которая
+            # никогда не найдется по реальному Nomenclature.barcode.
+            if not barcode or not article or not _BARCODE_RE.match(barcode):
+                if barcode and len(skipped_examples) < 5:
+                    skipped_examples.append(barcode)
                 continue
             mapping = OzonArticleMapping.query.filter_by(barcode=barcode).first()
             if mapping is None:
@@ -89,11 +103,25 @@ def ozon_mapping():
             mapping.article = article
             updated += 1
         db.session.commit()
-        flash(f"Сопоставление артикулов Ozon обновлено: {updated} строк", "success")
+        if updated:
+            flash(f"Сопоставление артикулов Ozon обновлено: {updated} строк", "success")
+        if skipped_examples:
+            flash(
+                "Пропущено строк, где первая колонка не похожа на штрихкод (6-20 цифр): "
+                + str(len(skipped_examples)) + (" и другие" if len(skipped_examples) == 5 else "")
+                + " — например: " + ", ".join(skipped_examples)
+                + ". Убедитесь, что загружаете именно файл «штрихкод → артикул», "
+                "а не готовую заявку на поставку.",
+                "warning",
+            )
+        if not updated and not skipped_examples:
+            flash("В файле не найдено ни одной строки со штрихкодом и артикулом", "danger")
         return redirect(url_for("marketplace_export.ozon_mapping"))
 
     return render_template(
-        "marketplace_export/ozon_mapping.html", count=OzonArticleMapping.query.count()
+        "marketplace_export/ozon_mapping.html",
+        count=OzonArticleMapping.query.count(),
+        preview=OzonArticleMapping.query.order_by(OzonArticleMapping.updated_at.desc()).limit(10).all(),
     )
 
 

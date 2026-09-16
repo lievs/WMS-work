@@ -86,6 +86,39 @@ def test_ozon_mapping_upload_upserts_by_barcode(db, client_logged_in):
     assert OzonArticleMapping.query.filter_by(barcode="8880100001").first().article == "Артикул-В"
 
 
+def test_ozon_mapping_upload_skips_rows_where_first_column_is_not_a_barcode(db, client_logged_in):
+    """Реальный баг: админ по ошибке загрузил в сопоставление готовую
+    "Заявку на поставку" (артикул/имя/количество) вместо исходного файла
+    штрихкод-артикул от Ozon — первая колонка там текстовый артикул, а не
+    штрихкод. Без проверки формата это создавало мусорные записи
+    (barcode=текст артикула), которые никогда не совпадут с реальным
+    Nomenclature.barcode, и "Заявка на поставку" молча не находила
+    артикулы. Теперь такие строки пропускаются, а не превращаются в
+    бесполезную запись."""
+    resp = client_logged_in.post(
+        "/marketplace-export/ozon-mapping",
+        data={
+            "file": (
+                _mapping_xlsx(
+                    [
+                        ("артикул", "имя (необязательно)"),
+                        ("Кардиган_Валерия_мол TM LIMITED A / Кардиганы (50-52)", 47),
+                        ("8880100001", "Артикул-А"),
+                    ]
+                ),
+                "map.xlsx",
+            )
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    assert OzonArticleMapping.query.count() == 1
+    assert OzonArticleMapping.query.first().barcode == "8880100001"
+    assert "не похожа на штрихкод" in resp.get_data(as_text=True)
+
+
 def test_ozon_mapping_upload_requires_admin(db, client):
     from wms.models import User
 

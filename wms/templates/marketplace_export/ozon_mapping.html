@@ -20,4 +20,18 @@
     <button type="submit" class="btn btn-primary">Загрузить</button>
   </form>
 </div>
+
+{% if preview %}
+<div class="card p-3" style="max-width: 480px">
+  <h6 class="mb-2">Последние загруженные (для проверки)</h6>
+  <table class="table table-sm">
+    <thead><tr><th>Штрихкод</th><th>Артикул</th></tr></thead>
+    <tbody>
+    {% for row in preview %}
+      <tr><td>{{ row.barcode }}</td><td>{{ row.article }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
 {% endblock %}

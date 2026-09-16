@@ -50,3 +50,44 @@ def test_toggle_is_independent_from_accounting_flag(db, client_logged_in):
 
     assert doc.marketplace_request_created_at is not None
     assert doc.accounting_entered_at is None
+
+
+def test_set_marketplace_request_number(db, client_logged_in):
+    doc = _make_document()
+
+    resp = client_logged_in.post(
+        f"/movement/{doc.id}/marketplace-request-number",
+        data={"marketplace_request_number": "МП-12345"},
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    assert doc.marketplace_request_number == "МП-12345"
+    html = resp.get_data(as_text=True)
+    idx = html.find(doc.number)
+    assert "МП-12345" in html[idx : idx + 1500]
+
+
+def test_marketplace_request_number_can_be_cleared(db, client_logged_in):
+    doc = _make_document()
+    doc.marketplace_request_number = "МП-999"
+    db.session.commit()
+
+    client_logged_in.post(
+        f"/movement/{doc.id}/marketplace-request-number",
+        data={"marketplace_request_number": "  "},
+    )
+
+    assert doc.marketplace_request_number is None
+
+
+def test_marketplace_request_number_independent_of_checkbox(db, client_logged_in):
+    doc = _make_document()
+
+    client_logged_in.post(
+        f"/movement/{doc.id}/marketplace-request-number",
+        data={"marketplace_request_number": "МП-777"},
+    )
+
+    assert doc.marketplace_request_number == "МП-777"
+    assert doc.marketplace_request_created_at is None

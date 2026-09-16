@@ -751,6 +751,10 @@ class MovementDocument(db.Model):
     # от зеленой "1С" — независима от нее и от самой отправки, для
     # отдельного контроля за заявкой на приемку на стороне маркетплейса.
     marketplace_request_created_at = db.Column(db.DateTime, nullable=True)
+    # Номер самой заявки на приемку у маркетплейса — вносится вручную,
+    # когда становится известен (галочка выше могла быть отмечена раньше,
+    # до того как номер стал известен). См. movement.update_marketplace_request_number.
+    marketplace_request_number = db.Column(db.String(50), nullable=True)
 
     from_warehouse = db.relationship("Warehouse", foreign_keys=[from_warehouse_id])
     to_warehouse = db.relationship("Warehouse", foreign_keys=[to_warehouse_id])

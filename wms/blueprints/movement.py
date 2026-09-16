@@ -847,6 +847,17 @@ def toggle_marketplace_request(doc_id):
     return redirect(url_for("movement.list_documents"))
 
 
+@bp.route("/<int:doc_id>/marketplace-request-number", methods=["POST"])
+def update_marketplace_request_number(doc_id):
+    """Номер заявки на приемку у маркетплейса — вносится вручную, когда
+    становится известен, отдельно от галочки "заявка создана" выше
+    (галочку можно поставить раньше, до того как номер стал известен)."""
+    doc = MovementDocument.query.get_or_404(doc_id)
+    doc.marketplace_request_number = request.form.get("marketplace_request_number", "").strip() or None
+    db.session.commit()
+    return redirect(url_for("movement.list_documents"))
+
+
 @bp.route("/<int:doc_id>/export.xlsx")
 def export_document(doc_id):
     doc = MovementDocument.query.get_or_404(doc_id)

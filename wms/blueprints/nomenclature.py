@@ -152,12 +152,36 @@ def list_nomenclature():
         page=page, per_page=NOMENCLATURE_PAGE_SIZE, error_out=False
     )
     categories = ProductCategory.query.order_by(ProductCategory.name).all()
+
+    # Остаток по товару — сумма того, что упаковано в короба (в любом
+    # статусе/складе), плюс неразмещенный остаток. Считаем только для
+    # позиций текущей страницы, одним групповым запросом на каждый
+    # источник — иначе на 100 строк было бы по 2 запроса на каждую.
+    item_ids = [item.id for item in pagination.items]
+    stock_by_item = {}
+    if item_ids:
+        for nid, qty in (
+            db.session.query(BoxItem.nomenclature_id, db.func.sum(BoxItem.qty))
+            .filter(BoxItem.nomenclature_id.in_(item_ids))
+            .group_by(BoxItem.nomenclature_id)
+            .all()
+        ):
+            stock_by_item[nid] = stock_by_item.get(nid, 0) + qty
+        for nid, qty in (
+            db.session.query(UnplacedStock.nomenclature_id, db.func.sum(UnplacedStock.qty))
+            .filter(UnplacedStock.nomenclature_id.in_(item_ids), UnplacedStock.qty > 0)
+            .group_by(UnplacedStock.nomenclature_id)
+            .all()
+        ):
+            stock_by_item[nid] = stock_by_item.get(nid, 0) + qty
+
     return render_template(
         "nomenclature/list.html",
         items=pagination.items,
         pagination=pagination,
         q=q,
         categories=categories,
+        stock_by_item=stock_by_item,
     )
 
 

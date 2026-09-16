@@ -43,9 +43,19 @@ def suggest_cell(warehouse_id, box):
     """Подсказка ячейки под конкретный короб: сначала ищем ячейку, где уже
     лежит короб с тем же товаром (пусть даже вперемешку с другим — это не
     критично), затем — просто ячейку в том же ряду, где такой товар уже
-    есть где-нибудь, и только если совсем ничего похожего нет — любую
-    ячейку с местом (предпочитая уже частично заполненные, чтобы не плодить
-    начатые ячейки по одной коробке)."""
+    есть где-нибудь.
+
+    Дальше поведение зависит от того, "ходовой" ли это товар — коробов с
+    ним на складе больше, чем вмещает одна ячейка (см. is_bulk ниже). Для
+    такого товара выгоднее завести под него отдельную (пустую) ячейку и
+    заполнять именно ее, а не распылять его по чужим ячейкам вперемешку —
+    поэтому пустая ячейка предпочтительнее уже занятой чем-то другим. По
+    той же причине ячейку, целиком занятую под ДРУГОЙ ходовой товар, пока
+    у него еще остались неразмещенные короба, стараемся не трогать — как
+    только он закончится (неразмещенных коробов не останется), ячейка
+    перестает быть "зарезервированной" и снова участвует в общем подборе.
+    Для обычного (не ходового) товара поведение прежнее — предпочитаем уже
+    начатую ячейку, чтобы не плодить начатые ячейки по одной коробке."""
     nomenclature_ids = {item.nomenclature_id for item in box.items}
     if not nomenclature_ids:
         return None
@@ -77,6 +87,39 @@ def suggest_cell(warehouse_id, box):
         .all()
     )
 
+    # Остатки по товару на складе: всего коробов (в любом статусе) и
+    # сколько из них еще не размещено — чтобы понять, "ходовой" ли товар
+    # (bulk) и не закончился ли он. Группировка по (nomenclature_id, box_id) —
+    # именно короб, а не ячейка, иначе несколько неразмещенных коробов с
+    # одним товаром (все с cell_id=None) схлопнулись бы в одну строку.
+    warehouse_nom_counts = {}
+    unplaced_nom_counts = {}
+    for nid, box_id, is_unplaced in (
+        db.session.query(BoxItem.nomenclature_id, Box.id, Box.cell_id.is_(None))
+        .join(Box, BoxItem.box_id == Box.id)
+        .filter(Box.warehouse_id == warehouse_id, Box.id != box.id)
+        .distinct()
+        .all()
+    ):
+        warehouse_nom_counts[nid] = warehouse_nom_counts.get(nid, 0) + 1
+        if is_unplaced:
+            unplaced_nom_counts[nid] = unplaced_nom_counts.get(nid, 0) + 1
+
+    def is_bulk(nid):
+        return warehouse_nom_counts.get(nid, 0) > CELL_CAPACITY
+
+    bulk_own = any(is_bulk(nid) for nid in nomenclature_ids)
+
+    cell_occupant_noms = {}
+    for cell_id_val, nid in (
+        db.session.query(Box.cell_id, BoxItem.nomenclature_id)
+        .join(BoxItem, BoxItem.box_id == Box.id)
+        .filter(Box.warehouse_id == warehouse_id, Box.cell_id.isnot(None), Box.id != box.id)
+        .distinct()
+        .all()
+    ):
+        cell_occupant_noms.setdefault(cell_id_val, set()).add(nid)
+
     best = None
     for cell in cells:
         if cell.id == box.cell_id:
@@ -86,7 +129,26 @@ def suggest_cell(warehouse_id, box):
             continue
         direct_match = cell.id in matched_cell_ids
         row_match = bool(cell.zone_id and cell.zone_id in matched_zone_ids)
-        score = (not direct_match, not row_match, -count, cell.code)
+
+        occupants = cell_occupant_noms.get(cell.id, set())
+        reserved_for_other_bulk = False
+        if not direct_match and len(occupants) == 1:
+            (occupant_nid,) = occupants
+            reserved_for_other_bulk = (
+                occupant_nid not in nomenclature_ids
+                and is_bulk(occupant_nid)
+                and unplaced_nom_counts.get(occupant_nid, 0) > 0
+            )
+
+        mix_penalty = bulk_own and not direct_match and count > 0
+        score = (
+            not direct_match,
+            reserved_for_other_bulk,
+            not row_match,
+            mix_penalty,
+            count if bulk_own else -count,
+            cell.code,
+        )
         if best is None or score < best[0]:
             best = (score, cell, direct_match, row_match, count)
 
@@ -97,6 +159,8 @@ def suggest_cell(warehouse_id, box):
         reason = f"в ячейке уже есть такой же товар ({count} короб. в ячейке)"
     elif row_match:
         reason = f"такой товар уже есть в этом ряду ({cell.zone.code})"
+    elif bulk_own and count == 0:
+        reason = "этого товара много на складе — заводим под него отдельную ячейку"
     elif count > 0:
         reason = "ячейка уже частично заполнена"
     else:

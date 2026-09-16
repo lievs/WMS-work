@@ -1,0 +1,135 @@
+"""Отчет «Аномалии в коробах» (reports.box_anomalies_report) — сравнивает
+кол-во товара в коробе с медианой по группе "вид товара (категория) +
+размер" по всем цветам/SKU этой группы (один и тот же фасон того же
+размера обычно упаковывают в короб одинаковым количеством независимо от
+цвета) — сильное отклонение чаще всего означает ошибку приемки."""
+
+from wms.extensions import db
+from wms.models import Box, BoxItem, Nomenclature, ProductCategory, Warehouse
+
+
+def _make_warehouse(code):
+    wh = Warehouse(code=code, name=f"Склад {code}")
+    db.session.add(wh)
+    db.session.commit()
+    return wh
+
+
+def _make_item(sku, barcode, name, category, size):
+    item = Nomenclature(sku=sku, barcode=barcode, name=name, size=size, category=category, unit="шт")
+    db.session.add(item)
+    db.session.commit()
+    return item
+
+
+def _pack(warehouse, box_number, item, qty):
+    box = Box(box_number=box_number, warehouse_id=warehouse.id, status="stored")
+    db.session.add(box)
+    db.session.commit()
+    db.session.add(BoxItem(box_id=box.id, nomenclature_id=item.id, qty=qty))
+    db.session.commit()
+    return box
+
+
+def test_flags_box_far_above_group_median(db, client_logged_in):
+    wh = _make_warehouse("WH-BA-1")
+    category = ProductCategory(name="Кардиган-BA1", keywords="кардиган-ba1")
+    db.session.add(category)
+    db.session.commit()
+    red = _make_item("SKU-BA-RED", "9991000001", "Кардиган красный", category, "44")
+    blue = _make_item("SKU-BA-BLUE", "9991000002", "Кардиган синий", category, "44")
+
+    # Типичное количество для этой связки категория+размер — 10, во всех
+    # цветах, кроме одного короба с явно завышенным количеством.
+    _pack(wh, "BOX-BA-1", red, 10)
+    _pack(wh, "BOX-BA-2", blue, 10)
+    _pack(wh, "BOX-BA-3", red, 11)
+    anomaly_box = _pack(wh, "BOX-BA-4", blue, 40)
+
+    html = client_logged_in.get("/reports/box-anomalies").get_data(as_text=True)
+
+    assert anomaly_box.box_number in html
+    assert "BOX-BA-1" not in html
+    assert "BOX-BA-2" not in html
+    assert "BOX-BA-3" not in html
+
+
+def test_flags_box_far_below_group_median(db, client_logged_in):
+    wh = _make_warehouse("WH-BA-2")
+    category = ProductCategory(name="Кардиган-BA2", keywords="кардиган-ba2")
+    db.session.add(category)
+    db.session.commit()
+    red = _make_item("SKU-BA2-RED", "9991000003", "Кардиган красный", category, "46")
+    blue = _make_item("SKU-BA2-BLUE", "9991000004", "Кардиган синий", category, "46")
+
+    _pack(wh, "BOX-BA2-1", red, 12)
+    _pack(wh, "BOX-BA2-2", blue, 12)
+    anomaly_box = _pack(wh, "BOX-BA2-3", red, 1)
+
+    html = client_logged_in.get("/reports/box-anomalies").get_data(as_text=True)
+
+    assert anomaly_box.box_number in html
+    assert "BOX-BA2-1" not in html
+    assert "BOX-BA2-2" not in html
+
+
+def test_ignores_items_without_category_or_size(db, client_logged_in):
+    wh = _make_warehouse("WH-BA-3")
+    item = Nomenclature(
+        sku="SKU-BA3-NOCAT", barcode="9991000005", name="Товар без категории", unit="шт"
+    )
+    db.session.add(item)
+    db.session.commit()
+
+    # Явно "аномальное" количество, но сравнивать не с чем — нет ни
+    # категории, ни размера, поэтому в отчет попадать не должно.
+    box = _pack(wh, "BOX-BA3-1", item, 1000)
+
+    html = client_logged_in.get("/reports/box-anomalies").get_data(as_text=True)
+
+    assert box.box_number not in html
+    assert "Аномалий не найдено" in html
+
+
+def test_warehouse_filter_still_uses_global_median(db, client_logged_in):
+    """Медиана "типичного" количества считается по всем складам сразу — сам
+    список в отчете можно сузить фильтром по складу, но это не должно
+    портить сравнение (не сводить медиану к одному складу)."""
+    wh_a = _make_warehouse("WH-BA-4A")
+    wh_b = _make_warehouse("WH-BA-4B")
+    category = ProductCategory(name="Кардиган-BA4", keywords="кардиган-ba4")
+    db.session.add(category)
+    db.session.commit()
+    red = _make_item("SKU-BA4-RED", "9991000006", "Кардиган красный", category, "48")
+    blue = _make_item("SKU-BA4-BLUE", "9991000007", "Кардиган синий", category, "48")
+
+    # Эталонные короба — на другом складе.
+    _pack(wh_a, "BOX-BA4-1", red, 10)
+    _pack(wh_a, "BOX-BA4-2", blue, 10)
+    anomaly_box = _pack(wh_b, "BOX-BA4-3", red, 45)
+
+    html = client_logged_in.get(f"/reports/box-anomalies?warehouse_id={wh_b.id}").get_data(as_text=True)
+
+    assert anomaly_box.box_number in html
+    assert "BOX-BA4-1" not in html
+
+
+def test_threshold_query_param_adjusts_sensitivity(db, client_logged_in):
+    wh = _make_warehouse("WH-BA-5")
+    category = ProductCategory(name="Кардиган-BA5", keywords="кардиган-ba5")
+    db.session.add(category)
+    db.session.commit()
+    red = _make_item("SKU-BA5-RED", "9991000008", "Кардиган красный", category, "50")
+    blue = _make_item("SKU-BA5-BLUE", "9991000009", "Кардиган синий", category, "50")
+
+    _pack(wh, "BOX-BA5-1", red, 10)
+    _pack(wh, "BOX-BA5-2", blue, 10)
+    borderline_box = _pack(wh, "BOX-BA5-3", red, 18)  # x1.8 от медианы
+
+    default_html = client_logged_in.get("/reports/box-anomalies").get_data(as_text=True)
+    assert borderline_box.box_number not in default_html  # порог по умолчанию x3
+
+    sensitive_html = client_logged_in.get(
+        "/reports/box-anomalies?threshold=1.5"
+    ).get_data(as_text=True)
+    assert borderline_box.box_number in sensitive_html

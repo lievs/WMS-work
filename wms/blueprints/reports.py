@@ -1,9 +1,12 @@
+import statistics
+from collections import defaultdict
 from datetime import datetime
 
 from flask import Blueprint, Response, render_template, request
 
 from ..extensions import db
 from ..models import (
+    Box,
     BoxItem,
     MovementDocument,
     MovementLine,
@@ -199,4 +202,79 @@ def shipped_report_export():
         data,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": content_disposition(fname)},
+    )
+
+
+BOX_ANOMALY_RATIO_DEFAULT = 3.0
+# Группе нужно минимум 2 короба (сам + хотя бы один для сравнения), иначе
+# медиана — это просто сам товар и сравнивать не с чем.
+BOX_ANOMALY_MIN_GROUP_SIZE = 2
+
+
+def _box_anomaly_rows(warehouse_id=None, ratio_threshold=BOX_ANOMALY_RATIO_DEFAULT):
+    """Ищет короба с подозрительным количеством товара — сравнивает qty
+    каждой строки короба с медианой по группе "вид товара (категория) +
+    размер" по ВСЕМ цветам/SKU этой группы сразу: одна и та же модель
+    разного цвета того же размера обычно упаковывается в короб одинаковым
+    количеством, поэтому медиана по группе — это и есть "типичное"
+    количество для сравнения. Строки без категории или без размера у
+    товара сравнивать не с чем — пропускаются. Медиана считается по ВСЕМ
+    коробам во всех складах (чем больше выборка, тем надежнее "типичное"
+    значение), а склад из фильтра сужает только то, что показываем."""
+    all_items = (
+        db.session.query(BoxItem, Box, Nomenclature)
+        .join(Box, BoxItem.box_id == Box.id)
+        .join(Nomenclature, BoxItem.nomenclature_id == Nomenclature.id)
+        .filter(Nomenclature.category_id.isnot(None), Nomenclature.size.isnot(None))
+        .all()
+    )
+
+    groups = defaultdict(list)
+    for box_item, _box, nomenclature in all_items:
+        groups[(nomenclature.category_id, nomenclature.size)].append(box_item.qty)
+
+    medians = {
+        key: statistics.median(values)
+        for key, values in groups.items()
+        if len(values) >= BOX_ANOMALY_MIN_GROUP_SIZE
+    }
+
+    rows = []
+    for box_item, box, nomenclature in all_items:
+        if warehouse_id and box.warehouse_id != warehouse_id:
+            continue
+        median = medians.get((nomenclature.category_id, nomenclature.size))
+        if not median:
+            continue
+        ratio = box_item.qty / median
+        if ratio >= ratio_threshold or ratio <= 1 / ratio_threshold:
+            rows.append(
+                {
+                    "box": box,
+                    "nomenclature": nomenclature,
+                    "qty": box_item.qty,
+                    "median": median,
+                    "ratio": ratio,
+                    "group_size": len(groups[(nomenclature.category_id, nomenclature.size)]),
+                }
+            )
+
+    rows.sort(key=lambda r: max(r["ratio"], 1 / r["ratio"]), reverse=True)
+    return rows
+
+
+@bp.route("/box-anomalies")
+def box_anomalies_report():
+    warehouse_id = request.args.get("warehouse_id", type=int)
+    threshold = request.args.get("threshold", type=float) or BOX_ANOMALY_RATIO_DEFAULT
+    if threshold <= 1:
+        threshold = BOX_ANOMALY_RATIO_DEFAULT
+    rows = _box_anomaly_rows(warehouse_id=warehouse_id, ratio_threshold=threshold)
+    warehouses = Warehouse.query.order_by(Warehouse.code).all()
+    return render_template(
+        "reports/box_anomalies.html",
+        rows=rows,
+        warehouses=warehouses,
+        selected_warehouse_id=warehouse_id,
+        threshold=threshold,
     )

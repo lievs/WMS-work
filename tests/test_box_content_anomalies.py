@@ -31,6 +31,29 @@ def _pack(warehouse, box_number, item, qty):
     return box
 
 
+def test_flags_anomaly_even_with_only_two_boxes_in_group(db, client_logged_in):
+    """Самый частый в жизни случай: в группе категория+размер всего два
+    короба — по одному на каждый цвет. Если считать медиану по группе
+    целиком (включая сам сравниваемый короб), выброс сдвигает медиану к
+    себе и почти не отличается от нее по отношению — репорт эту явную
+    ошибку приемки (кол-во руками поменяли в 10 раз) не покажет.
+    Медиана должна считаться БЕЗ самого сравниваемого короба (см.
+    reports._box_anomaly_rows)."""
+    wh = _make_warehouse("WH-BA-6")
+    category = ProductCategory(name="Кардиган-BA6", keywords="кардиган-ba6")
+    db.session.add(category)
+    db.session.commit()
+    red = _make_item("SKU-BA6-RED", "9991000010", "Кардиган красный", category, "52")
+    blue = _make_item("SKU-BA6-BLUE", "9991000011", "Кардиган синий", category, "52")
+
+    _pack(wh, "BOX-BA6-1", red, 10)
+    anomaly_box = _pack(wh, "BOX-BA6-2", blue, 100)  # руками поправили в 10 раз
+
+    html = client_logged_in.get("/reports/box-anomalies").get_data(as_text=True)
+
+    assert anomaly_box.box_number in html
+
+
 def test_flags_box_far_above_group_median(db, client_logged_in):
     wh = _make_warehouse("WH-BA-1")
     category = ProductCategory(name="Кардиган-BA1", keywords="кардиган-ba1")

@@ -213,14 +213,23 @@ BOX_ANOMALY_MIN_GROUP_SIZE = 2
 
 def _box_anomaly_rows(warehouse_id=None, ratio_threshold=BOX_ANOMALY_RATIO_DEFAULT):
     """Ищет короба с подозрительным количеством товара — сравнивает qty
-    каждой строки короба с медианой по группе "вид товара (категория) +
-    размер" по ВСЕМ цветам/SKU этой группы сразу: одна и та же модель
-    разного цвета того же размера обычно упаковывается в короб одинаковым
-    количеством, поэтому медиана по группе — это и есть "типичное"
-    количество для сравнения. Строки без категории или без размера у
-    товара сравнивать не с чем — пропускаются. Медиана считается по ВСЕМ
-    коробам во всех складах (чем больше выборка, тем надежнее "типичное"
-    значение), а склад из фильтра сужает только то, что показываем."""
+    каждой строки короба с медианой ОСТАЛЬНЫХ записей группы "вид товара
+    (категория) + размер" по ВСЕМ цветам/SKU этой группы сразу: одна и та
+    же модель разного цвета того же размера обычно упаковывается в короб
+    одинаковым количеством, поэтому медиана по группе — это и есть
+    "типичное" количество для сравнения.
+
+    Медиана считается БЕЗ самой сравниваемой записи (leave-one-out), а не
+    по группе целиком — иначе при маленькой группе (например, всего 2
+    короба — по одному на каждый цвет, самый частый случай) сам выброс
+    сдвигает медиану к себе и перестает быть заметен: короб с 10-кратным
+    перебором и обычный короб дали бы почти одинаковое отношение к общей
+    медиане, и аномалия осталась бы незамеченной.
+
+    Строки без категории или без размера у товара сравнивать не с чем —
+    пропускаются. Медиана считается по ВСЕМ коробам во всех складах (чем
+    больше выборка, тем надежнее "типичное" значение), а склад из фильтра
+    сужает только то, что показываем."""
     all_items = (
         db.session.query(BoxItem, Box, Nomenclature)
         .join(Box, BoxItem.box_id == Box.id)
@@ -233,17 +242,16 @@ def _box_anomaly_rows(warehouse_id=None, ratio_threshold=BOX_ANOMALY_RATIO_DEFAU
     for box_item, _box, nomenclature in all_items:
         groups[(nomenclature.category_id, nomenclature.size)].append(box_item.qty)
 
-    medians = {
-        key: statistics.median(values)
-        for key, values in groups.items()
-        if len(values) >= BOX_ANOMALY_MIN_GROUP_SIZE
-    }
-
     rows = []
     for box_item, box, nomenclature in all_items:
         if warehouse_id and box.warehouse_id != warehouse_id:
             continue
-        median = medians.get((nomenclature.category_id, nomenclature.size))
+        group = groups[(nomenclature.category_id, nomenclature.size)]
+        if len(group) < BOX_ANOMALY_MIN_GROUP_SIZE:
+            continue
+        others = list(group)
+        others.remove(box_item.qty)
+        median = statistics.median(others)
         if not median:
             continue
         ratio = box_item.qty / median
@@ -255,7 +263,7 @@ def _box_anomaly_rows(warehouse_id=None, ratio_threshold=BOX_ANOMALY_RATIO_DEFAU
                     "qty": box_item.qty,
                     "median": median,
                     "ratio": ratio,
-                    "group_size": len(groups[(nomenclature.category_id, nomenclature.size)]),
+                    "group_size": len(group),
                 }
             )
 

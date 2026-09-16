@@ -69,19 +69,24 @@
 
 <div class="list-group">
 {% for line in lines %}
+  {% set eq = line.expected_qty %}
+  {% set mismatch = eq is not none and line.qty != eq %}
   <div class="list-group-item py-2 px-2"
-       data-confirm-url="{{ url_for('receiving.confirm_line', doc_id=doc.id, line_id=line.id) }}">
+       data-confirm-url="{{ url_for('receiving.confirm_line', doc_id=doc.id, line_id=line.id) }}"
+       data-expected="{{ eq if eq is not none else '' }}">
     <div class="small" style="word-break: break-word;">{{ line.nomenclature.name }}</div>
     <div class="d-flex align-items-center justify-content-between gap-2 mt-1">
-      <div class="text-muted small text-truncate">
-        {% if line.expected_qty is not none %}
-          {% set eq = line.expected_qty %}
+      <div class="small text-truncate{{ ' text-danger fw-semibold' if mismatch else ' text-muted' }}" data-expected-label>
+        {% if eq is not none %}
           По накладной: {{ eq | int if eq == eq | int else eq | round(3) }} {{ line.nomenclature.unit }}
+          <span class="{{ '' if mismatch else 'd-none' }}" data-diff-badge>
+            ⚠ {{ '+' if line.qty > eq else '' }}{{ ((line.qty - eq) | int) if (line.qty - eq) == (line.qty - eq) | int else (line.qty - eq) | round(3) }}
+          </span>
         {% endif %}
       </div>
       <div class="d-flex align-items-center gap-2 flex-shrink-0">
         {% set q = line.qty %}
-        <input type="number" inputmode="decimal" step="0.001" min="0" class="form-control form-control-sm qty-input"
+        <input type="number" inputmode="decimal" step="0.001" min="0" class="form-control form-control-sm qty-input{{ ' border-danger' if mismatch else '' }}"
                style="width:5.5em" value="{{ q | int if q == q | int else q | round(3) }}"
                {% if doc.status not in ('draft', 'recounting') %}disabled{% endif %}>
         <div class="form-check form-switch mb-0">
@@ -124,6 +129,32 @@
     const confirmUrl = row.dataset.confirmUrl;
     const qtyInput = row.querySelector(".qty-input");
     const checkbox = row.querySelector(".confirm-checkbox");
+    const expectedLabel = row.querySelector("[data-expected-label]");
+    const diffBadge = row.querySelector("[data-diff-badge]");
+
+    // Подсветка расхождения "по накладной" vs фактически введенного —
+    // сразу по мере ввода, не дожидаясь сохранения (см. save() ниже).
+    function updateMismatch() {
+      if (!qtyInput || row.dataset.expected === "") return;
+      const expected = parseFloat(row.dataset.expected);
+      const actual = parseFloat(qtyInput.value);
+      const mismatch = !Number.isNaN(actual) && actual !== expected;
+      qtyInput.classList.toggle("border-danger", mismatch);
+      if (expectedLabel) {
+        expectedLabel.classList.toggle("text-danger", mismatch);
+        expectedLabel.classList.toggle("fw-semibold", mismatch);
+        expectedLabel.classList.toggle("text-muted", !mismatch);
+      }
+      if (diffBadge) {
+        if (mismatch) {
+          const diff = actual - expected;
+          diffBadge.textContent = "⚠ " + (diff > 0 ? "+" : "") + (Number.isInteger(diff) ? diff : diff.toFixed(3));
+          diffBadge.classList.remove("d-none");
+        } else {
+          diffBadge.classList.add("d-none");
+        }
+      }
+    }
 
     function save() {
       fetch(confirmUrl, {
@@ -140,6 +171,7 @@
         });
     }
 
+    if (qtyInput) qtyInput.addEventListener("input", updateMismatch);
     if (qtyInput) qtyInput.addEventListener("change", save);
     if (checkbox) checkbox.addEventListener("change", save);
   });

@@ -8,9 +8,17 @@
   порядок совпадает с MovementLine.id). "Артикул товара" Ozon — не наш
   внутренний SKU, а отдельная строка, которую нужно предварительно
   сопоставить со штрихкодом через OzonArticleMapping (см. ozon_mapping).
-- Wildberries: тот же принцип, но проще — колонки "Баркод товара"/"ШК
-  короба" не требуют отдельного сопоставления артикулов, годится наш
-  собственный Nomenclature.barcode как есть.
+- Wildberries: проще во всем — "Баркод товара" не требует отдельного
+  сопоставления (годится наш Nomenclature.barcode как есть), а "ШК
+  короба" — это наш СОБСТВЕННЫЙ номер короба (Box.box_number), а не
+  что-то выданное WB, поэтому запрашивать отдельный список не нужно,
+  файл собирается и скачивается сразу (см. wb_package_composition).
+- Ozon "заявка на поставку" (products-import-template): отдельно от
+  состава по грузовым местам — одна строка на SKU с суммарным
+  количеством по ВСЕМ коробам перемещения сразу (не по коробам
+  отдельно), см. ozon_supply_request. Сумма количеств в обоих файлах
+  должна совпадать, иначе Ozon аннулирует состав ГМ (см. инструкцию в
+  самом шаблоне "Состав ГМ").
 
 И там, и там "Срок годности" WMS не отслеживает — оставляется пустым,
 заполняется вручную при необходимости, как и предусмотрено самими
@@ -24,6 +32,7 @@ from ..extensions import db
 from ..models import MovementDocument, MovementLine, OzonArticleMapping
 from ..utils.excel_io import (
     export_ozon_package_composition,
+    export_ozon_supply_request,
     export_wb_package_composition,
     timestamp_for_filename,
 )
@@ -143,43 +152,73 @@ def ozon_package_composition(doc_id):
     )
 
 
-@bp.route("/movement/<int:doc_id>/wb", methods=["GET", "POST"])
-def wb_package_composition(doc_id):
+@bp.route("/movement/<int:doc_id>/ozon/supply-request")
+def ozon_supply_request(doc_id):
+    """"Заявка на поставку" Ozon — в отличие от ozon_package_composition
+    (по коробам), здесь одна строка на SKU с суммарным количеством по
+    ВСЕМ коробам перемещения сразу; ШК ГМ тут не нужен, поэтому файл
+    скачивается сразу, без промежуточной формы."""
     doc = _get_viewable_movement(doc_id)
     lines = doc.lines.order_by(MovementLine.id.asc()).all()
 
-    if request.method == "POST":
-        raw = request.form.get("box_barcodes", "")
-        box_barcodes = [b.strip() for b in raw.splitlines() if b.strip()]
-        if len(box_barcodes) != len(lines):
-            flash(
-                f"Штрихкодов короба должно быть ровно {len(lines)} (по числу коробов в "
-                f"перемещении), а введено {len(box_barcodes)}",
-                "danger",
+    totals = {}
+    for line in lines:
+        for item in line.box.items:
+            entry = totals.setdefault(
+                item.nomenclature_id,
+                {"barcode": item.nomenclature.barcode, "name": item.nomenclature.name, "qty": 0.0},
             )
-            return render_template(
-                "marketplace_export/wb_export.html", doc=doc, lines=lines, box_barcodes_raw=raw
-            )
+            entry["qty"] += item.qty
 
-        rows = []
-        for line, box_barcode in zip(lines, box_barcodes):
-            for item in line.box.items:
-                rows.append(
-                    {
-                        "barcode": item.nomenclature.barcode,
-                        "qty": item.qty,
-                        "box_barcode": box_barcode,
-                    }
-                )
+    rows = []
+    unmapped = set()
+    for entry in totals.values():
+        mapping = OzonArticleMapping.query.filter_by(barcode=entry["barcode"]).first()
+        if mapping is None:
+            unmapped.add(entry["barcode"])
+        rows.append({"article": mapping.article if mapping else "", "name": entry["name"], "qty": entry["qty"]})
+    rows.sort(key=lambda r: r["name"])
 
-        data = export_wb_package_composition(rows)
-        fname = f"{doc.number}_wb_shk_{timestamp_for_filename()}.xlsx"
-        return Response(
-            data,
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": content_disposition(fname)},
+    data = export_ozon_supply_request(rows)
+    if unmapped:
+        flash(
+            "Не найден артикул Ozon для штрихкодов: " + ", ".join(sorted(unmapped))
+            + " — колонка «артикул» для них оставлена пустой, заполните вручную "
+            "или дозагрузите сопоставление.",
+            "warning",
         )
+    fname = f"{doc.number}_ozon_supply_request_{timestamp_for_filename()}.xlsx"
+    return Response(
+        data,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": content_disposition(fname)},
+    )
 
-    return render_template(
-        "marketplace_export/wb_export.html", doc=doc, lines=lines, box_barcodes_raw=""
+
+@bp.route("/movement/<int:doc_id>/wb")
+def wb_package_composition(doc_id):
+    """В отличие от Ozon (там штрихкод ГМ генерирует сам маркетплейс),
+    в "ШК короба" для WB вносится наш собственный номер короба
+    (Box.box_number) — отдельный список запрашивать не нужно, файл
+    скачивается сразу."""
+    doc = _get_viewable_movement(doc_id)
+    lines = doc.lines.order_by(MovementLine.id.asc()).all()
+
+    rows = []
+    for line in lines:
+        for item in line.box.items:
+            rows.append(
+                {
+                    "barcode": item.nomenclature.barcode,
+                    "qty": item.qty,
+                    "box_barcode": line.box.box_number,
+                }
+            )
+
+    data = export_wb_package_composition(rows)
+    fname = f"{doc.number}_wb_shk_{timestamp_for_filename()}.xlsx"
+    return Response(
+        data,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": content_disposition(fname)},
     )

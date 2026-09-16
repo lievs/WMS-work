@@ -146,6 +146,49 @@ def test_ozon_export_leaves_article_blank_when_not_mapped(db, client_logged_in):
     assert not rows[1][1]
 
 
+def test_ozon_supply_request_downloads_immediately_without_gm_barcodes(db, client_logged_in):
+    """В отличие от ozon_package_composition, заявке на поставку не нужны
+    штрихкоды ГМ (это не про короба, а про итоговое количество по SKU) —
+    файл скачивается сразу по GET, без промежуточной формы."""
+    doc, item1, item2 = _make_ozon_movement()
+    db.session.add_all(
+        [
+            OzonArticleMapping(barcode=item1.barcode, article="Артикул-1"),
+            OzonArticleMapping(barcode=item2.barcode, article="Артикул-2"),
+        ]
+    )
+    db.session.commit()
+
+    resp = client_logged_in.get(f"/marketplace-export/movement/{doc.id}/ozon/supply-request")
+
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    rows = _read_xlsx_rows(resp.data)
+    assert set(rows) == {("Артикул-1", item1.name, 5.0), ("Артикул-2", item2.name, 7.0)}
+
+
+def test_ozon_supply_request_sums_quantity_across_boxes_of_same_sku(db, client_logged_in):
+    doc, item1, _item2 = _make_ozon_movement()
+    # Сопоставление артикула нужно, чтобы строка не отфильтровалась
+    # _read_xlsx_rows (она отбрасывает строки с пустой первой колонкой —
+    # для остальных шаблонов там всегда штрихкод, а тут — необязательный
+    # артикул, который в этом тесте не важен, важна только сумма).
+    db.session.add(OzonArticleMapping(barcode=item1.barcode, article="Артикул-1"))
+    sender = Warehouse.query.filter_by(code="WH-MPX-1").first()
+    extra_box = Box(box_number="BOX-MPX-3", warehouse_id=sender.id, status="open")
+    db.session.add(extra_box)
+    db.session.commit()
+    db.session.add(BoxItem(box_id=extra_box.id, nomenclature_id=item1.id, qty=2))
+    db.session.add(MovementLine(document_id=doc.id, box_id=extra_box.id, from_warehouse_id=sender.id))
+    db.session.commit()
+
+    resp = client_logged_in.get(f"/marketplace-export/movement/{doc.id}/ozon/supply-request")
+
+    rows = _read_xlsx_rows(resp.data)
+    row_for_item1 = next(r for r in rows if r[1] == item1.name)
+    assert row_for_item1[2] == 7.0  # 5 (BOX-MPX-1) + 2 (BOX-MPX-3)
+
+
 def test_ozon_export_rejects_mismatched_barcode_count(db, client_logged_in):
     doc, _item1, _item2 = _make_ozon_movement()
 
@@ -160,17 +203,17 @@ def test_ozon_export_rejects_mismatched_barcode_count(db, client_logged_in):
     assert "ровно 2" in resp.get_data(as_text=True)
 
 
-def test_wb_export_builds_file_without_article_mapping(db, client_logged_in):
+def test_wb_export_uses_our_own_box_numbers_as_shk_koroba(db, client_logged_in):
+    """Для WB в "ШК короба" вносится наш собственный номер короба
+    (Box.box_number) — WB не выдает отдельных штрихкодов, как Ozon, поэтому
+    запрашивать какой-либо список не нужно, файл скачивается сразу по GET."""
     doc, item1, item2 = _make_ozon_movement()
 
-    resp = client_logged_in.post(
-        f"/marketplace-export/movement/{doc.id}/wb",
-        data={"box_barcodes": "WB-0001\nWB-0002"},
-    )
+    resp = client_logged_in.get(f"/marketplace-export/movement/{doc.id}/wb")
 
     assert resp.status_code == 200
     rows = _read_xlsx_rows(resp.data)
     assert rows == [
-        (item1.barcode, 5.0, "WB-0001", None, None),
-        (item2.barcode, 7.0, "WB-0002", None, None),
+        (item1.barcode, 5.0, "BOX-MPX-1", None, None),
+        (item2.barcode, 7.0, "BOX-MPX-2", None, None),
     ]

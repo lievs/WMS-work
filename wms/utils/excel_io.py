@@ -526,3 +526,28 @@ def export_wb_package_composition(rows) -> bytes:
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+# Заголовки шаблона Ozon "заявка на поставку" (products-import-template) —
+# именно в нижнем регистре, как в самом шаблоне.
+OZON_SUPPLY_REQUEST_HEADERS = ["артикул", "имя (необязательно)", "количество"]
+
+
+def export_ozon_supply_request(rows) -> bytes:
+    """rows — [{"article", "name", "qty"}], одна строка на SKU с суммарным
+    количеством по ВСЕМ коробам перемещения (см.
+    marketplace_export.ozon_supply_request) — это заявка на поставку
+    целиком, отдельно от состава по грузовым местам
+    (export_ozon_package_composition): сумма количеств в обоих файлах
+    должна совпадать, иначе Ozon аннулирует состав ГМ."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    _style_header(ws, OZON_SUPPLY_REQUEST_HEADERS)
+
+    for row in rows:
+        ws.append([row["article"], row["name"], row["qty"]])
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()

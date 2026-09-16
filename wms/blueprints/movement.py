@@ -360,8 +360,13 @@ def route_box_add():
     box = Box.query.get_or_404(box_id)
     to_warehouse = Warehouse.query.get_or_404(to_warehouse_id)
 
+    # Ищем черновик на этот маршрут независимо от того, кто его начал —
+    # иначе двое сотрудников, собирающих одно направление порознь, каждый
+    # находили бы только СВОИ черновики (owned_query ограничивает чужие) и
+    # получали бы разные документы вместо одного общего (см. также
+    # new_document, где этот же поиск сделан без owned_query).
     doc = (
-        owned_query(MovementDocument).filter_by(
+        MovementDocument.query.filter_by(
             from_warehouse_id=box.warehouse_id, to_warehouse_id=to_warehouse_id, status="draft"
         )
         .order_by(MovementDocument.created_at.desc())

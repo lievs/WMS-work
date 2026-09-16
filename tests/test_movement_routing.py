@@ -2,6 +2,8 @@
 потребности плана отгрузок, с учетом уже едущих туда (но не принятых)
 коробов — см. обсуждение "нужно 30, отсканировали короб с 10"."""
 
+from flask import g
+
 from wms.extensions import db
 from wms.models import (
     Box,
@@ -11,9 +13,29 @@ from wms.models import (
     Nomenclature,
     ShipmentPlan,
     ShipmentPlanLine,
+    User,
     Warehouse,
 )
 from wms.blueprints.movement import _compute_routing
+
+
+def _login_as(client, user):
+    # Тест держит один app context на весь запуск (см. фикстуру db) — без
+    # сброса кэша Flask-Login "current_user" следующий запрос тем же
+    # client все еще резолвился бы в ПРЕДЫДУЩЕГО пользователя (см. тот же
+    # прием в test_auth_session_revocation.py).
+    g.pop("_login_user", None)
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(user.id)
+        sess["_fresh"] = True
+
+
+def _make_staff_user(username):
+    user = User(username=username, full_name=username, role="warehouse")
+    user.set_password("x")
+    db.session.add(user)
+    db.session.commit()
+    return user
 
 
 def _setup_plan(planned_qty=30, fulfilled_qty=0):
@@ -154,6 +176,31 @@ def test_routing_add_creates_draft_movement_and_reuses_it(db, client_logged_in):
         from_warehouse_id=sender.id, to_warehouse_id=city.id
     ).all()
     assert len(docs) == 1  # второй вызов не создал новый документ
+    assert docs[0].lines.count() == 2
+
+
+def test_route_box_add_joins_draft_started_by_a_different_user(db, client):
+    """Регрессия: route_box_add искал существующий черновик через
+    owned_query (только СВОИ документы), поэтому второй сотрудник,
+    собирающий то же направление, не находил черновик первого и получал
+    отдельный документ — то есть двое собирали одно направление в двух
+    разных документах вместо одного общего. Тесты с client_logged_in
+    (админ) это не ловили: owned_query не ограничивает админа."""
+    sender, city, item = _setup_plan(planned_qty=30)
+    box1 = _make_box(sender, item, qty=10, box_number="BOX-000020")
+    box2 = _make_box(sender, item, qty=5, box_number="BOX-000021")
+
+    alice = _make_staff_user("alice-routing")
+    bob = _make_staff_user("bob-routing")
+
+    _login_as(client, alice)
+    client.post("/movement/route-box/add", data={"box_id": box1.id, "to_warehouse_id": city.id})
+
+    _login_as(client, bob)
+    client.post("/movement/route-box/add", data={"box_id": box2.id, "to_warehouse_id": city.id})
+
+    docs = MovementDocument.query.filter_by(from_warehouse_id=sender.id, to_warehouse_id=city.id).all()
+    assert len(docs) == 1
     assert docs[0].lines.count() == 2
 
 

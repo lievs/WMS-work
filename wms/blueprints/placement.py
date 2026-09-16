@@ -303,6 +303,43 @@ def write_off_stock():
     return redirect(url_for("placement.list_documents"))
 
 
+@bp.route("/scan-box")
+def scan_box():
+    """Быстрое размещение уже упакованного короба (например, приехавшего
+    перемещением) по принципу "куда везти короб" в перемещениях —
+    сканируем короб, сразу видим рекомендованную ячейку и подтверждаем,
+    без захода в какой-либо документ размещения (см. place_box_standalone,
+    который уже умеет расставлять короб без документа — этой странице не
+    хватало только самого сканирования как отдельного входа, а не строчки
+    в общем списке "Короба без ячейки" на placement.list_documents)."""
+    box_number = request.args.get("box_number", "").strip()
+    box = None
+    suggestion = None
+    not_found = False
+    already_placed = False
+    empty_box = False
+    if box_number:
+        box = Box.find_by_scanned_code(box_number)
+        if not box:
+            not_found = True
+        elif box.cell_id is not None:
+            already_placed = True
+        elif box.items.count() == 0:
+            empty_box = True
+        else:
+            suggestion = suggest_cell(box.warehouse_id, box)
+
+    return render_template(
+        "placement/scan_box.html",
+        box_number=box_number,
+        box=box,
+        suggestion=suggestion,
+        not_found=not_found,
+        already_placed=already_placed,
+        empty_box=empty_box,
+    )
+
+
 @bp.route("/new", methods=["GET", "POST"])
 def new_document():
     if request.method == "GET":

@@ -45,21 +45,7 @@ def test_staff_sees_only_own_documents_and_cannot_open_foreign(db, client):
         db.session.add_all([own, foreign])
         created.append((own, foreign, list_path, detail_path))
 
-    own_move = MovementDocument(
-        number="OWN-MOVE",
-        from_warehouse_id=warehouse.id,
-        to_warehouse_id=warehouse.id,
-        created_by_id=first.id,
-    )
-    foreign_move = MovementDocument(
-        number="FOREIGN-MOVE",
-        from_warehouse_id=warehouse.id,
-        to_warehouse_id=warehouse.id,
-        created_by_id=second.id,
-    )
-    db.session.add_all([own_move, foreign_move])
     db.session.commit()
-    created.append((own_move, foreign_move, "/movement/", "/movement/{id}"))
 
     _login(client, first)
     for own, foreign, list_path, detail_path in created:
@@ -67,6 +53,55 @@ def test_staff_sees_only_own_documents_and_cannot_open_foreign(db, client):
         assert own.number in html
         assert foreign.number not in html
         assert client.get(detail_path.format(id=foreign.id)).status_code == 404
+
+
+def test_staff_sees_foreign_movement_only_while_draft(db, client):
+    """Перемещение — особый случай среди документов: пока оно "черновик",
+    его могут собирать сообща несколько сотрудников (см.
+    movement.route_box_add — один и тот же маршрут ищется без учета
+    автора, чтобы разные сотрудники, сканирующие короба на одно
+    направление, попадали в один документ), поэтому черновик виден и
+    находится любым сотрудником, а не только автором — иначе для того,
+    кто добавил короб не первым, документ выглядел бы так, будто короб
+    "потерялся". После завершения документ снова приватен, как и другие
+    типы документов выше."""
+    first = _user("movement-doc-first")
+    second = _user("movement-doc-second")
+    warehouse = Warehouse(code="WH-MOVE-DOC", name="Основной")
+    target = Warehouse(code="WH-MOVE-DOC-2", name="Склад №2")
+    db.session.add_all([warehouse, target])
+    db.session.commit()
+
+    own_draft = MovementDocument(
+        number="OWN-MOVE", from_warehouse_id=warehouse.id, to_warehouse_id=target.id, created_by_id=first.id
+    )
+    foreign_draft = MovementDocument(
+        number="FOREIGN-MOVE-DRAFT",
+        from_warehouse_id=warehouse.id,
+        to_warehouse_id=target.id,
+        created_by_id=second.id,
+    )
+    foreign_completed = MovementDocument(
+        number="FOREIGN-MOVE-DONE",
+        from_warehouse_id=warehouse.id,
+        to_warehouse_id=target.id,
+        created_by_id=second.id,
+        status="completed",
+    )
+    db.session.add_all([own_draft, foreign_draft, foreign_completed])
+    db.session.commit()
+
+    _login(client, first)
+    html = client.get("/movement/").get_data(as_text=True)
+    assert own_draft.number in html
+    assert foreign_draft.number in html
+    assert foreign_completed.number not in html
+
+    assert client.get(f"/movement/{foreign_draft.id}").status_code == 200
+    assert client.get(f"/movement/{foreign_completed.id}").status_code == 404
+    # Видеть черновик — не значит мочь его завершить/изменить: это
+    # по-прежнему только автор или админ (см. movement._restrict_document_access).
+    assert client.post(f"/movement/{foreign_draft.id}/complete").status_code == 404
 
 
 def test_invoice_receiving_view_permission_shows_foreign_invoice_read_only(db, client):

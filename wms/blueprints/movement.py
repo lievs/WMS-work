@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from flask import Blueprint, Response, flash, redirect, render_template, request, url_for
+from flask import Blueprint, Response, abort, flash, redirect, render_template, request, url_for
 from flask_login import current_user
 from sqlalchemy import and_, func, or_
 
@@ -19,7 +19,6 @@ from ..models import (
     Warehouse,
 )
 from ..utils.excel_io import export_movement_to_excel, timestamp_for_filename
-from ..utils.document_access import get_owned_or_404, owned_query
 from ..utils.http import content_disposition
 from ..utils.numbering import next_number
 from ..utils.shipping_label_pdf import build_movement_shipping_labels_pdf
@@ -28,23 +27,57 @@ from ..utils.waybill_pdf import build_movement_waybills_pdf
 bp = Blueprint("movement", __name__)
 
 
+def _can_view_movement_document(doc):
+    """Только ПРОСМОТР (список/детали/поиск короба) — не изменение. Пока
+    документ "черновик" — его собирают сообща (см. route_box_add: черновик
+    на маршрут теперь ищется без учета автора, чтобы разные сотрудники,
+    сканирующие короба на одно направление, попадали в один документ),
+    поэтому видеть и находить его должен любой, а не только автор — иначе
+    для того, кто добавил короб не первым, документ выглядит так, будто
+    короб "потерялся" (не находится через "Найти короб", не виден в своем
+    списке "Перемещение"), хотя на самом деле он там и корректно учтен в
+    остатке потребности. После завершения документ снова приватен (виден
+    автору/админу/с movement_view_allowed) — сборка уже закончена, и учет
+    "чей документ" снова важен. Изменять чужой документ это НЕ разрешает —
+    см. _restrict_document_access: право "просмотр всех перемещений" тоже
+    только для чтения, оно намеренно не участвует в проверке для
+    изменяющих маршрутов."""
+    return (
+        current_user.is_admin
+        or current_user.can_view_movements()
+        or doc.created_by_id == current_user.id
+        or doc.status == "draft"
+    )
+
+
 @bp.before_request
 def _restrict_document_access():
     document_id = (request.view_args or {}).get("doc_id")
     if document_id is None:
         return None
+    doc = MovementDocument.query.get_or_404(document_id)
     readonly_endpoints = {"movement.detail", "movement.export_document"}
-    if request.endpoint in readonly_endpoints and current_user.can_view_movements():
-        MovementDocument.query.get_or_404(document_id)
+    if request.endpoint in readonly_endpoints:
+        if not _can_view_movement_document(doc):
+            abort(404)
         return None
-    get_owned_or_404(MovementDocument, document_id)
+    # Изменяющие маршруты (добавить/убрать короб, завершить, принять,
+    # удалить и т.п.) — только автор или админ, как и раньше. "Просмотр
+    # всех перемещений" здесь не действует (он read-only), а совместный
+    # доступ к черновику дальше даем только через route_box_add (у него
+    # нет doc_id в URL, этот хук на него не срабатывает) — не через
+    # произвольное изменение чужого документа по прямой ссылке.
+    if not (current_user.is_admin or doc.created_by_id == current_user.id):
+        abort(404)
     return None
 
 
 def _visible_movement_query():
     if current_user.can_view_movements():
         return MovementDocument.query
-    return owned_query(MovementDocument)
+    return MovementDocument.query.filter(
+        or_(MovementDocument.created_by_id == current_user.id, MovementDocument.status == "draft")
+    )
 
 SHIPPING_LABEL_SENDER_KEY = "movement_shipping_label_sender"
 
@@ -271,17 +304,18 @@ def find_box():
         if not box:
             not_found = True
         else:
-            lines = (
-                MovementLine.query.filter_by(box_id=box.id)
-                .join(MovementDocument, MovementLine.document_id == MovementDocument.id)
-                .filter(
-                    True
-                    if current_user.can_view_movements()
-                    else MovementDocument.created_by_id == current_user.id
-                )
-                .order_by(MovementDocument.created_at.desc())
-                .all()
+            lines_query = MovementLine.query.filter_by(box_id=box.id).join(
+                MovementDocument, MovementLine.document_id == MovementDocument.id
             )
+            if not current_user.can_view_movements():
+                # Черновик собирают сообща (см. _can_view_movement_document) —
+                # без этого условия короб, добавленный в чужой черновик через
+                # "Куда везти короб", выглядел бы "не найденным ни в одном
+                # перемещении" для того, кто его туда положил.
+                lines_query = lines_query.filter(
+                    or_(MovementDocument.created_by_id == current_user.id, MovementDocument.status == "draft")
+                )
+            lines = lines_query.order_by(MovementDocument.created_at.desc()).all()
 
     return render_template(
         "movement/list.html",

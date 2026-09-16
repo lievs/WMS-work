@@ -62,11 +62,6 @@
                   {% elif u.allowed_sections == 'none' %}Доступа нет
                   {% else %}Настроено ({{ u.allowed_section_set()|length }}){% endif %}
                 </button>
-                {% if not u.nomenclature_edit_allowed %}<div class="text-muted small">ред. номенклатуры запрещено</div>{% endif %}
-                {% if u.warehouse_mapping_allowed %}<div class="text-muted small">сопоставление складов 1С разрешено</div>{% endif %}
-                {% if u.invoice_receiving_view_allowed %}<div class="text-muted small">видит все приемки по накладным</div>{% endif %}
-                {% if u.movement_view_allowed %}<div class="text-muted small">видит все перемещения</div>{% endif %}
-
                 <div class="modal fade" id="sectionsModal{{ u.id }}" tabindex="-1" aria-hidden="true">
                   <div class="modal-dialog">
                     <div class="modal-content">
@@ -147,9 +142,6 @@
             </td>
             <td>{% if u.is_active_user %}<span class="badge bg-success">Активен</span>{% else %}<span class="badge bg-secondary">Отключен</span>{% endif %}</td>
             <td class="text-nowrap">
-              <form method="post" action="{{ url_for('auth.reset_password', user_id=u.id) }}" class="d-inline">
-                <button type="submit" class="btn btn-sm btn-outline-secondary">Сбросить пароль</button>
-              </form>
               <form method="post" action="{{ url_for('auth.set_password', user_id=u.id) }}" class="d-inline-flex gap-1 align-items-center">
                 <input type="text" name="password" class="form-control form-control-sm" style="width:150px" placeholder="Новый пароль" minlength="4" required>
                 <button type="submit" class="btn btn-sm btn-outline-secondary">Установить</button>

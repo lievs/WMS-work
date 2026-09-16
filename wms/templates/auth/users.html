@@ -151,7 +151,7 @@
                 <button type="submit" class="btn btn-sm btn-outline-secondary">Сбросить пароль</button>
               </form>
               <form method="post" action="{{ url_for('auth.set_password', user_id=u.id) }}" class="d-inline-flex gap-1 align-items-center">
-                <input type="text" name="password" class="form-control form-control-sm" style="width:110px" placeholder="Новый пароль" minlength="4" required>
+                <input type="text" name="password" class="form-control form-control-sm" style="width:150px" placeholder="Новый пароль" minlength="4" required>
                 <button type="submit" class="btn btn-sm btn-outline-secondary">Установить</button>
               </form>
               <form method="post" action="{{ url_for('auth.revoke_sessions', user_id=u.id) }}" class="d-inline"

@@ -211,13 +211,24 @@ BOX_ANOMALY_RATIO_DEFAULT = 3.0
 BOX_ANOMALY_MIN_GROUP_SIZE = 2
 
 
+def _box_anomaly_group_key(nomenclature):
+    """Группа для сравнения "типичного" количества в коробе. Лучший
+    случай — категория (вид товара) + размер сразу по всем цветам/SKU
+    этой связки (одна и та же модель разного цвета того же размера
+    обычно упаковывается одинаково). Если у товара не заполнена
+    категория или размер — сравнивать по этому признаку не с чем, но это
+    не повод пропускать проверку вообще: откатываемся на сравнение
+    короба с другими коробами ТОГО ЖЕ SKU (без кросс-цветового
+    сопоставления, но хоть какая-то проверка лучше отсутствия проверки)."""
+    if nomenclature.category_id is not None and nomenclature.size is not None:
+        return ("cat_size", nomenclature.category_id, nomenclature.size)
+    return ("sku", nomenclature.id)
+
+
 def _box_anomaly_rows(warehouse_id=None, ratio_threshold=BOX_ANOMALY_RATIO_DEFAULT):
     """Ищет короба с подозрительным количеством товара — сравнивает qty
-    каждой строки короба с медианой ОСТАЛЬНЫХ записей группы "вид товара
-    (категория) + размер" по ВСЕМ цветам/SKU этой группы сразу: одна и та
-    же модель разного цвета того же размера обычно упаковывается в короб
-    одинаковым количеством, поэтому медиана по группе — это и есть
-    "типичное" количество для сравнения.
+    каждой строки короба с медианой ОСТАЛЬНЫХ записей той же группы (см.
+    _box_anomaly_group_key).
 
     Медиана считается БЕЗ самой сравниваемой записи (leave-one-out), а не
     по группе целиком — иначе при маленькой группе (например, всего 2
@@ -226,27 +237,25 @@ def _box_anomaly_rows(warehouse_id=None, ratio_threshold=BOX_ANOMALY_RATIO_DEFAU
     перебором и обычный короб дали бы почти одинаковое отношение к общей
     медиане, и аномалия осталась бы незамеченной.
 
-    Строки без категории или без размера у товара сравнивать не с чем —
-    пропускаются. Медиана считается по ВСЕМ коробам во всех складах (чем
-    больше выборка, тем надежнее "типичное" значение), а склад из фильтра
+    Медиана считается по ВСЕМ коробам во всех складах (чем больше
+    выборка, тем надежнее "типичное" значение), а склад из фильтра
     сужает только то, что показываем."""
     all_items = (
         db.session.query(BoxItem, Box, Nomenclature)
         .join(Box, BoxItem.box_id == Box.id)
         .join(Nomenclature, BoxItem.nomenclature_id == Nomenclature.id)
-        .filter(Nomenclature.category_id.isnot(None), Nomenclature.size.isnot(None))
         .all()
     )
 
     groups = defaultdict(list)
     for box_item, _box, nomenclature in all_items:
-        groups[(nomenclature.category_id, nomenclature.size)].append(box_item.qty)
+        groups[_box_anomaly_group_key(nomenclature)].append(box_item.qty)
 
     rows = []
     for box_item, box, nomenclature in all_items:
         if warehouse_id and box.warehouse_id != warehouse_id:
             continue
-        group = groups[(nomenclature.category_id, nomenclature.size)]
+        group = groups[_box_anomaly_group_key(nomenclature)]
         if len(group) < BOX_ANOMALY_MIN_GROUP_SIZE:
             continue
         others = list(group)

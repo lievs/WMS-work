@@ -105,13 +105,38 @@ def test_ignores_items_without_category_or_size(db, client_logged_in):
     db.session.commit()
 
     # Явно "аномальное" количество, но сравнивать не с чем — нет ни
-    # категории, ни размера, поэтому в отчет попадать не должно.
+    # категории, ни размера, а других коробов с этим же товаром тоже нет
+    # (см. test_falls_back_to_same_sku_when_category_or_size_missing ниже
+    # для случая, когда другие короба того же товара есть).
     box = _pack(wh, "BOX-BA3-1", item, 1000)
 
     html = client_logged_in.get("/reports/box-anomalies").get_data(as_text=True)
 
     assert box.box_number not in html
-    assert "Аномалий не найдено" in html
+
+
+def test_falls_back_to_same_sku_when_category_or_size_missing(db, client_logged_in):
+    """Без категории/размера сравнивать по группе "вид+размер" не с чем, но
+    это не повод пропускать проверку целиком — если в системе есть другие
+    короба с тем же самым SKU, сравниваем короб хотя бы с ними (в реальных
+    данных это самый частый способ словить ошибку приемки: у товара просто
+    не заполнена карточка, но одинаковых коробов этого SKU в системе много,
+    и один из них резко выделяется по количеству)."""
+    wh = _make_warehouse("WH-BA-7")
+    item = Nomenclature(
+        sku="SKU-BA7-NOCAT", barcode="9991000012", name="Товар без категории", unit="шт"
+    )
+    db.session.add(item)
+    db.session.commit()
+
+    for i in range(1, 6):
+        _pack(wh, f"BOX-BA7-{i}", item, 10)
+    anomaly_box = _pack(wh, "BOX-BA7-6", item, 100)
+
+    html = client_logged_in.get("/reports/box-anomalies").get_data(as_text=True)
+
+    assert anomaly_box.box_number in html
+    assert "BOX-BA7-1" not in html
 
 
 def test_warehouse_filter_still_uses_global_median(db, client_logged_in):

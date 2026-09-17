@@ -581,8 +581,14 @@ class ReceivingDocument(db.Model):
     status = db.Column(db.String(20), nullable=False, default="draft")
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    # Когда документ перешел на пересчет/разбраковку — для истории статусов
+    # на странице приемки (см. receiving.send_to_recount/send_to_sorting).
+    # У приемок, завершенных до появления этих отметок, останутся пустыми.
+    recounting_started_at = db.Column(db.DateTime, nullable=True)
+    sorting_started_at = db.Column(db.DateTime, nullable=True)
     completed_at = db.Column(db.DateTime)
-    # Номер заявки поставщику — вносится вручную при загрузке накладной,
+    # Номер заказа поставщику ("№ заказа" в интерфейсе) — вносится вручную
+    # при загрузке накладной,
     # т.к. в самом файле от 1С его нет (это внутренний номер, по которому
     # заказывали товар). Вместе с supplier это то, по чему потом ищут,
     # откуда взялся неразмещенный остаток (см. UnplacedStockLot).

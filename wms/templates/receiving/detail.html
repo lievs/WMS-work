@@ -23,7 +23,7 @@
       {% else %}
         {{ doc.warehouse.name }}
       {% endif %}
-      {% if doc.supplier %}· Поставщик: {{ doc.supplier }}{% endif %}{% if doc.order_number %} · № заявки: {{ doc.order_number }}{% endif %}{% if doc.created_by %} · Автор: {{ doc.created_by.display_name() }}{% endif %}{% if doc.invoice_file_data %} · <a href="{{ url_for('receiving.download_invoice_file', doc_id=doc.id) }}">📄 Накладная</a>{% endif %}
+      {% if doc.supplier %}· Поставщик: {{ doc.supplier }}{% endif %}{% if doc.order_number %} · № заказа: {{ doc.order_number }}{% endif %}{% if doc.created_by %} · Автор: {{ doc.created_by.display_name() }}{% endif %}{% if doc.invoice_file_data %} · <a href="{{ url_for('receiving.download_invoice_file', doc_id=doc.id) }}">📄 Накладная</a>{% endif %}
     </div>
   </div>
   <div>
@@ -38,11 +38,6 @@
         <button type="submit" class="btn btn-success">✅ Завершить приемку</button>
       </form>
       {% endif %}
-    {% if current_user.is_admin %}
-    <form method="post" action="{{ url_for('receiving.delete_document', doc_id=doc.id) }}" class="d-inline" onsubmit="return confirm('Удалить документ приемки {{ doc.number }} целиком? Действие необратимо.');">
-      <button type="submit" class="btn btn-outline-danger">🗑 Удалить документ</button>
-    </form>
-    {% endif %}
     {% elif doc.status == 'recounting' %}
     <form method="post" action="{{ url_for('receiving.send_to_sorting', doc_id=doc.id) }}" class="d-inline">
       <button type="submit" class="btn btn-success">🔍 Отправить на разбраковку</button>
@@ -57,7 +52,20 @@
       <button type="submit" class="btn btn-outline-warning">↩ Вернуть на разбраковку</button>
     </form>
     {% endif %}
+    {% if current_user.is_admin %}
+    <form method="post" action="{{ url_for('receiving.delete_document', doc_id=doc.id) }}" class="d-inline"
+          onsubmit="return confirm('Удалить документ приемки {{ doc.number }} целиком? Действие необратимо.{% if doc.status == "completed" %} Зачисленный неразмещенный остаток будет списан обратно.{% endif %}');">
+      <button type="submit" class="btn btn-outline-danger">🗑 Удалить документ</button>
+    </form>
+    {% endif %}
   </div>
+</div>
+
+<div class="text-muted small mb-3">
+  Создано: {{ (doc.created_at|msk).strftime('%d.%m.%Y %H:%M') }}
+  {% if doc.recounting_started_at %} · На пересчете с: {{ (doc.recounting_started_at|msk).strftime('%d.%m.%Y %H:%M') }}{% endif %}
+  {% if doc.sorting_started_at %} · На разбраковке с: {{ (doc.sorting_started_at|msk).strftime('%d.%m.%Y %H:%M') }}{% endif %}
+  {% if doc.completed_at %} · Завершено: {{ (doc.completed_at|msk).strftime('%d.%m.%Y %H:%M') }}{% endif %}
 </div>
 
 {% if doc.status == 'recounting' %}

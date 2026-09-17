@@ -142,6 +142,41 @@ def list_documents():
         query = query.filter(ReceivingDocument.warehouse_id == warehouse_id)
 
     documents = query.order_by(ReceivingDocument.created_at.desc()).all()
+
+    # Возвраты и расхождения с накладной — одним batch-запросом сразу по
+    # всем документам страницы, чтобы подсветить их в списке (не заходя в
+    # каждый по отдельности), см. wms/templates/receiving/list.html.
+    doc_ids = [d.id for d in documents]
+    returns_count_by_doc = {}
+    mismatch_doc_ids = set()
+    total_qty_by_doc = {}
+    if doc_ids:
+        for doc_id, count in (
+            db.session.query(SupplierReturn.receiving_document_id, db.func.count(SupplierReturn.id))
+            .filter(SupplierReturn.receiving_document_id.in_(doc_ids))
+            .group_by(SupplierReturn.receiving_document_id)
+            .all()
+        ):
+            returns_count_by_doc[doc_id] = count
+        mismatch_doc_ids = {
+            row[0]
+            for row in db.session.query(ReceivingLine.document_id)
+            .filter(
+                ReceivingLine.document_id.in_(doc_ids),
+                ReceivingLine.expected_qty.isnot(None),
+                ReceivingLine.expected_qty != ReceivingLine.qty,
+            )
+            .distinct()
+            .all()
+        }
+        for doc_id, qty_sum in (
+            db.session.query(ReceivingLine.document_id, db.func.sum(ReceivingLine.qty))
+            .filter(ReceivingLine.document_id.in_(doc_ids))
+            .group_by(ReceivingLine.document_id)
+            .all()
+        ):
+            total_qty_by_doc[doc_id] = qty_sum or 0
+
     return render_template(
         "receiving/list.html",
         documents=documents,
@@ -150,6 +185,9 @@ def list_documents():
         supplier_q=supplier_q,
         warehouse_id=warehouse_id,
         warehouses=_receiving_warehouses(),
+        returns_count_by_doc=returns_count_by_doc,
+        mismatch_doc_ids=mismatch_doc_ids,
+        total_qty_by_doc=total_qty_by_doc,
     )
 
 
@@ -801,19 +839,57 @@ def delete_line(doc_id, line_id):
 
 @bp.route("/<int:doc_id>/delete", methods=["POST"])
 def delete_document(doc_id):
+    """Администратор может удалить приемку в ЛЮБОМ статусе. Черновик/
+    пересчет/разбраковка еще не повлияли на остатки — удаляются как есть.
+    Завершенная приемка уже зачислила неразмещенный остаток (см.
+    complete()) — сначала отменяем этот эффект, точно так же, как при
+    возврате на разбраковку (см. revert_to_sorting): убираем зачисленное
+    и еще не выгруженные в 1С возвраты поставщику. Если часть остатка уже
+    размещена в короба — как и там, откатить нельзя, документ не
+    удаляется (иначе непонятно, какие физические единицы забирать назад)."""
     if not current_user.is_admin:
         flash("Удалять документы может только администратор", "danger")
         return redirect(url_for("receiving.detail", doc_id=doc_id))
 
     doc = ReceivingDocument.query.get_or_404(doc_id)
-    if doc.status != "draft":
-        flash("Можно удалить только черновик — завершенный документ уже повлиял на остатки", "danger")
-        return redirect(url_for("receiving.detail", doc_id=doc_id))
+    synced_returns = 0
+
+    if doc.status == "completed":
+        lots = UnplacedStockLot.query.filter_by(receiving_document_id=doc.id).all()
+        already_placed = [lot for lot in lots if lot.qty_remaining < lot.qty_received]
+        if already_placed:
+            names = ", ".join(sorted({lot.nomenclature.name for lot in already_placed}))
+            flash(
+                f"Нельзя удалить — товар уже частично размещен в короба: {names}",
+                "danger",
+            )
+            return redirect(url_for("receiving.detail", doc_id=doc_id))
+
+        for lot in lots:
+            row = UnplacedStock.query.filter_by(
+                warehouse_id=doc.warehouse_id, nomenclature_id=lot.nomenclature_id
+            ).first()
+            if row:
+                row.qty = max(row.qty - lot.qty_remaining, 0)
+            db.session.delete(lot)
+
+        synced_returns = (
+            SupplierReturn.query.filter_by(receiving_document_id=doc.id)
+            .filter(SupplierReturn.synced_to_1c_at.isnot(None))
+            .count()
+        )
+        SupplierReturn.query.filter_by(receiving_document_id=doc.id, synced_to_1c_at=None).delete()
 
     number = doc.number
     db.session.delete(doc)
     db.session.commit()
-    flash(f"Документ приемки {number} удален", "success")
+    message = f"Документ приемки {number} удален"
+    if synced_returns:
+        message += (
+            f". Внимание: по ней уже выгружен(о) в 1С {synced_returns} возврат(ов) "
+            f"поставщику — они не отменены, сверьте вручную."
+        )
+    flash(message, "warning" if synced_returns else "success")
     return redirect(url_for("receiving.list_documents"))
 
 
@@ -878,6 +954,7 @@ def send_to_recount(doc_id):
         return _next_redirect(doc.id)
 
     doc.status = "recounting"
+    doc.recounting_started_at = datetime.utcnow()
     db.session.commit()
     flash(f"Приемка {doc.number} отправлена на пересчет", "success")
     return _next_redirect(doc.id)
@@ -893,6 +970,7 @@ def send_to_sorting(doc_id):
         return _next_redirect(doc.id)
 
     doc.status = "sorting"
+    doc.sorting_started_at = datetime.utcnow()
     db.session.commit()
     flash(f"Приемка {doc.number} отправлена на разбраковку", "success")
     return _next_redirect(doc.id)

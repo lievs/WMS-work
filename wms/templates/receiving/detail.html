@@ -1,13 +1,21 @@
 {% extends "base.html" %}
 {% block title %}Приемка {{ doc.number }}{% endblock %}
 {% block content %}
-{% set status_labels = {'draft': 'Черновик', 'recounting': 'На пересчете', 'sorting': 'На разбраковке', 'completed': 'Завершен'} %}
 <p><a href="{{ url_for('receiving.list_documents') }}">&larr; Приемка</a></p>
 
 <div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
   <div>
     <h3 class="mb-1">Приемка {{ doc.number }}
-      <span class="badge badge-status-{{ doc.status }}">{{ status_labels.get(doc.status, doc.status) }}</span>
+      <span class="status-chips" role="group" aria-label="Статус приемки">
+        <span class="status-chip status-chip-draft status-chip-reached"
+              title="Черновик: {{ (doc.created_at|msk).strftime('%d.%m.%Y %H:%M') }}">Ч</span>
+        <span class="status-chip status-chip-recounting{{ ' status-chip-reached' if doc.recounting_started_at else '' }}"
+              title="Пересчет: {{ (doc.recounting_started_at|msk).strftime('%d.%m.%Y %H:%M') if doc.recounting_started_at else 'еще не наступил' }}">П</span>
+        <span class="status-chip status-chip-sorting{{ ' status-chip-reached' if doc.sorting_started_at else '' }}"
+              title="Разбраковка: {{ (doc.sorting_started_at|msk).strftime('%d.%m.%Y %H:%M') if doc.sorting_started_at else 'еще не наступила' }}">Р</span>
+        <span class="status-chip status-chip-completed{{ ' status-chip-reached' if doc.completed_at else '' }}"
+              title="Завершено: {{ (doc.completed_at|msk).strftime('%d.%m.%Y %H:%M') if doc.completed_at else 'еще не наступило' }}">З</span>
+      </span>
     </h3>
     <div class="text-muted d-flex align-items-center flex-wrap gap-1">
       Склад:
@@ -59,13 +67,6 @@
     </form>
     {% endif %}
   </div>
-</div>
-
-<div class="text-muted small mb-3">
-  Создано: {{ (doc.created_at|msk).strftime('%d.%m.%Y %H:%M') }}
-  {% if doc.recounting_started_at %} · На пересчете с: {{ (doc.recounting_started_at|msk).strftime('%d.%m.%Y %H:%M') }}{% endif %}
-  {% if doc.sorting_started_at %} · На разбраковке с: {{ (doc.sorting_started_at|msk).strftime('%d.%m.%Y %H:%M') }}{% endif %}
-  {% if doc.completed_at %} · Завершено: {{ (doc.completed_at|msk).strftime('%d.%m.%Y %H:%M') }}{% endif %}
 </div>
 
 {% if doc.status == 'recounting' %}

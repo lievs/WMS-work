@@ -54,6 +54,31 @@ body {
 .badge-status-stored { background-color: #0d6efd; }
 .badge-status-merged { background-color: #6c757d; }
 
+/* Плашки статусов приемки (черновик/пересчет/разбраковка/завершено) —
+   4 небольшие плашки рядом вместо одного бейджа, чтобы по цвету видеть,
+   до какого этапа дошел документ, а по подсказке при наведении — дату
+   перехода (для сравнения скорости прохождения этапов между приемками). */
+.status-chips { display: inline-flex; gap: 3px; vertical-align: middle; }
+.status-chip {
+  display: inline-block;
+  min-width: 1.5em;
+  height: 1.5em;
+  line-height: 1.5em;
+  padding: 0 .25em;
+  border-radius: .25rem;
+  font-size: .7rem;
+  font-weight: 600;
+  text-align: center;
+  color: #fff;
+  opacity: .35;
+  cursor: default;
+}
+.status-chip.status-chip-reached { opacity: 1; }
+.status-chip-draft { background-color: #6c757d; }
+.status-chip-recounting { background-color: #fd7e14; }
+.status-chip-sorting { background-color: #ffc107; color: #000; }
+.status-chip-completed { background-color: #198754; }
+
 /* ---- Мобильный экран ---- */
 
 /* Широкие таблицы не должны ломать верстку на телефоне — скроллим по горизонтали */

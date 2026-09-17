@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Накладная {{ doc.number }}{% endblock %}
 {% block content %}
-{% set status_labels = {'draft': 'Черновик', 'recounting': 'На пересчете', 'sorting': 'На разбраковке', 'completed': 'Завершена'} %}
 {% set can_edit_defect = doc.status == 'sorting' and (doc.is_from_invoice_import() or current_user.is_admin) %}
 <p><a href="{{ url_for('receiving.list_documents') }}">&larr; Приемка</a></p>
 
@@ -10,7 +9,17 @@
   {% if doc.supplier %}{{ doc.supplier }} · {% endif %}{{ doc.warehouse.name }}
   {% if doc.order_number %} · № заказа: {{ doc.order_number }}{% endif %}
   {% if doc.created_by %} · Автор: {{ doc.created_by.display_name() }}{% endif %}
-  · <span class="badge badge-status-{{ doc.status }}">{{ status_labels.get(doc.status, doc.status) }}</span>
+  ·
+  <span class="status-chips" role="group" aria-label="Статус приемки">
+    <span class="status-chip status-chip-draft status-chip-reached"
+          title="Черновик: {{ (doc.created_at|msk).strftime('%d.%m.%Y %H:%M') }}">Ч</span>
+    <span class="status-chip status-chip-recounting{{ ' status-chip-reached' if doc.recounting_started_at else '' }}"
+          title="Пересчет: {{ (doc.recounting_started_at|msk).strftime('%d.%m.%Y %H:%M') if doc.recounting_started_at else 'еще не наступил' }}">П</span>
+    <span class="status-chip status-chip-sorting{{ ' status-chip-reached' if doc.sorting_started_at else '' }}"
+          title="Разбраковка: {{ (doc.sorting_started_at|msk).strftime('%d.%m.%Y %H:%M') if doc.sorting_started_at else 'еще не наступила' }}">Р</span>
+    <span class="status-chip status-chip-completed{{ ' status-chip-reached' if doc.completed_at else '' }}"
+          title="Завершено: {{ (doc.completed_at|msk).strftime('%d.%m.%Y %H:%M') if doc.completed_at else 'еще не наступило' }}">З</span>
+  </span>
   {% if doc.invoice_file_data %} · <a href="{{ url_for('receiving.download_invoice_file', doc_id=doc.id) }}">📄 Скачать накладную</a>{% endif %}
 </div>
 

@@ -104,6 +104,8 @@ def test_list_shows_total_qty_and_returns_count(db, client_logged_in):
 
 
 def test_detail_page_shows_status_change_dates(db, client_logged_in):
+    """Даты перехода статусов видны в подсказке к плашке "Пересчет" (см.
+    tests/test_receiving_status_chips.py — там же проверка самих плашек)."""
     wh = _make_warehouse("5")
     item = _make_item("5")
     doc = ReceivingDocument(number="RLH-0005", warehouse_id=wh.id, invoice_file_name="накладная.xlsx")
@@ -116,6 +118,6 @@ def test_detail_page_shows_status_change_dates(db, client_logged_in):
     client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
     html = client_logged_in.get(f"/receiving/{doc.id}").get_data(as_text=True)
 
-    assert "На пересчете с:" in html
+    assert "Пересчет:" in html
     doc = ReceivingDocument.query.get(doc.id)
     assert doc.recounting_started_at is not None

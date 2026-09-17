@@ -135,6 +135,44 @@ def test_export_includes_movement_still_in_transit(db, client_logged_in):
     assert any(m["number"] == "PER-BOX-1C-4" for m in data["movements"])
 
 
+def test_export_comment_includes_marketplace_request_number(db, client_logged_in):
+    """Номер заявки на приемку у маркетплейса (вносится вручную в списке
+    перемещений, см. movement.update_marketplace_request_number) должен
+    попадать в комментарий документа при выгрузке в 1С — рядом с номером
+    перемещения, чтобы документ можно было найти в 1С по любому из них."""
+    _set_token()
+    sender = Warehouse(code="WH-1C-11", name="Основной склад")
+    city = Warehouse(code="WH-1C-12", name="ОЗОН: Сочи", marketplace="ozon", marketplace_city="Сочи")
+    db.session.add_all([sender, city])
+    db.session.commit()
+    item = _make_item("9990000008")
+
+    doc = _ship_box(sender, city, item, 1, "BOX-1C-5", client_logged_in)
+    doc.marketplace_request_number = "REQ-778"
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    data = resp.get_json()
+    movement = next(m for m in data["movements"] if m["number"] == "PER-BOX-1C-5")
+    assert "(№ заявки МП: REQ-778: PER-BOX-1C-5)" in movement["comment"]
+
+
+def test_export_comment_without_marketplace_request_number_unchanged(db, client_logged_in):
+    _set_token()
+    sender = Warehouse(code="WH-1C-13", name="Основной склад")
+    city = Warehouse(code="WH-1C-14", name="ОЗОН: Тула", marketplace="ozon", marketplace_city="Тула")
+    db.session.add_all([sender, city])
+    db.session.commit()
+    item = _make_item("9990000009")
+
+    _ship_box(sender, city, item, 1, "BOX-1C-6", client_logged_in)
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    data = resp.get_json()
+    movement = next(m for m in data["movements"] if m["number"] == "PER-BOX-1C-6")
+    assert "№ заявки МП" not in movement["comment"]
+
+
 def test_export_groups_supplier_returns_by_receiving_document(db, client_logged_in):
     _set_token()
     wh = Warehouse(code="WH-1C-7", name="Основной склад")

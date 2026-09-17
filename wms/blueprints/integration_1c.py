@@ -121,6 +121,13 @@ def _movement_payload(doc):
                 }
             )
     to_warehouse_name = doc.to_warehouse.name if doc.to_warehouse else ""
+    comment = f"WMS: {doc.number} (склад получатель: {to_warehouse_name})"
+    if doc.marketplace_request_number:
+        # Номер заявки на приемку у маркетплейса (вносится вручную в списке
+        # перемещений, см. movement.update_marketplace_request_number) —
+        # рядом с номером перемещения, чтобы можно было найти документ в 1С
+        # по любому из двух номеров.
+        comment += f" (№ заявки МП: {doc.marketplace_request_number}: {doc.number})"
     return {
         "id": doc.id,
         "number": doc.number,
@@ -131,7 +138,7 @@ def _movement_payload(doc):
         # to_warehouse выше подменен на общий "Товары в пути на
         # Фулфилмент" (см. _to_warehouse_name_for_1c), это единственное
         # место, где виден настоящий адресат перемещения.
-        "comment": f"WMS: {doc.number} (склад получатель: {to_warehouse_name})",
+        "comment": comment,
         "lines": lines,
     }
 

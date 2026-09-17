@@ -12,12 +12,15 @@ from ..models import (
     MovementLine,
     Nomenclature,
     PlacementDocument,
+    ProductCategory,
     ReceivingDocument,
+    ReceivingLine,
     Warehouse,
 )
 from ..utils.excel_io import (
     export_movement_to_excel,
     export_placement_to_excel,
+    export_receiving_status_report_to_excel,
     export_receiving_to_excel,
     export_shipped_report_to_excel,
     timestamp_for_filename,
@@ -88,6 +91,109 @@ def _filtered_movement():
     if date_to:
         query = query.filter(MovementDocument.created_at < date_to)
     return query.order_by(MovementDocument.created_at.desc()).all()
+
+
+RECEIVING_STATUS_LABELS = {
+    "draft": "Черновик",
+    "recounting": "На пересчете",
+    "sorting": "На разбраковке",
+    "completed": "Завершена",
+}
+
+
+def _receiving_status_since(doc):
+    """С какого момента документ находится в ТЕКУЩЕМ статусе — для
+    draft/completed это просто created_at/completed_at, а для
+    recounting/sorting берем отметку перехода (см. ReceivingDocument.
+    recounting_started_at/sorting_started_at); нет отметки (приемка
+    завершена до появления этих полей) — откатываемся на created_at,
+    чтобы отчет не падал на старых документах."""
+    if doc.status == "recounting":
+        return doc.recounting_started_at or doc.created_at
+    if doc.status == "sorting":
+        return doc.sorting_started_at or doc.created_at
+    if doc.status == "completed":
+        return doc.completed_at or doc.created_at
+    return doc.created_at
+
+
+def _receiving_status_rows():
+    """Для каждой приемки — статус, сколько дней она в нем висит, суммарное
+    кол-во товара по строкам и вид(ы) товара (ProductCategory.name, см. ее
+    докстринг — это и есть "вид товара" в терминах WMS). Помогает найти
+    заявки, застрявшие на каком-то этапе дольше обычного."""
+    unfinished_only = request.args.get("unfinished") == "on"
+    documents = _filtered_receiving()
+    if unfinished_only:
+        documents = [d for d in documents if d.status != "completed"]
+
+    doc_ids = [d.id for d in documents]
+    qty_by_doc = defaultdict(float)
+    category_ids_by_doc = defaultdict(set)
+    if doc_ids:
+        line_rows = (
+            db.session.query(
+                ReceivingLine.document_id,
+                ReceivingLine.qty,
+                Nomenclature.category_id,
+            )
+            .join(Nomenclature, ReceivingLine.nomenclature_id == Nomenclature.id)
+            .filter(ReceivingLine.document_id.in_(doc_ids))
+            .all()
+        )
+        category_ids = {r.category_id for r in line_rows if r.category_id is not None}
+        category_names = (
+            {c.id: c.name for c in ProductCategory.query.filter(ProductCategory.id.in_(category_ids)).all()}
+            if category_ids
+            else {}
+        )
+        for document_id, qty, category_id in line_rows:
+            qty_by_doc[document_id] += qty
+            if category_id is not None:
+                category_ids_by_doc[document_id].add(category_names.get(category_id, ""))
+
+    now = datetime.utcnow()
+    rows = []
+    for doc in documents:
+        since = _receiving_status_since(doc)
+        rows.append(
+            {
+                "document": doc,
+                "status_label": RECEIVING_STATUS_LABELS.get(doc.status, doc.status),
+                "days_in_status": (now - since).days if since else None,
+                "qty": qty_by_doc.get(doc.id, 0),
+                "categories": ", ".join(sorted(c for c in category_ids_by_doc.get(doc.id, set()) if c)),
+            }
+        )
+    rows.sort(key=lambda r: r["days_in_status"] or 0, reverse=True)
+    return rows
+
+
+@bp.route("/receiving-status")
+def receiving_status_report():
+    rows = _receiving_status_rows()
+    warehouses = Warehouse.query.order_by(Warehouse.code).all()
+    return render_template(
+        "reports/receiving_status.html",
+        rows=rows,
+        warehouses=warehouses,
+        selected_warehouse_id=request.args.get("warehouse_id", type=int),
+        date_from=request.args.get("date_from", ""),
+        date_to=request.args.get("date_to", ""),
+        unfinished_only=request.args.get("unfinished") == "on",
+    )
+
+
+@bp.route("/receiving-status.xlsx")
+def receiving_status_report_export():
+    rows = _receiving_status_rows()
+    data = export_receiving_status_report_to_excel(rows)
+    fname = f"receiving_status_report_{timestamp_for_filename()}.xlsx"
+    return Response(
+        data,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": content_disposition(fname)},
+    )
 
 
 @bp.route("/receiving.xlsx")

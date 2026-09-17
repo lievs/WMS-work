@@ -66,6 +66,14 @@
 
   <div class="col-md-6">
     <div class="card p-3">
+      <h5>Статусы приемки</h5>
+      <p class="text-muted small">По каждой приемке — статус, сколько дней она в нем висит, кол-во и вид товара — помогает найти застрявшие заявки.</p>
+      <a class="btn btn-primary" href="{{ url_for('reports.receiving_status_report') }}">📊 Открыть отчет</a>
+    </div>
+  </div>
+
+  <div class="col-md-6">
+    <div class="card p-3">
       <h5>Аномалии в коробах</h5>
       <p class="text-muted small">Сравнивает количество товара в коробе с типичным для той же связки "вид товара + размер" по всем цветам — помогает найти ошибку приемки.</p>
       <a class="btn btn-primary" href="{{ url_for('reports.box_anomalies_report') }}">📊 Открыть отчет</a>

@@ -469,6 +469,42 @@ def export_shipped_report_to_excel(rows) -> bytes:
     return buffer.getvalue()
 
 
+RECEIVING_STATUS_REPORT_HEADERS = [
+    "Номер",
+    "Склад",
+    "Статус",
+    "Дней в статусе",
+    "Кол-во товара",
+    "Вид товара",
+]
+
+
+def export_receiving_status_report_to_excel(rows) -> bytes:
+    """rows — список словарей {"document", "status_label", "days_in_status",
+    "qty", "categories"} (см. reports._receiving_status_rows)."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Статусы приемки"
+    _style_header(ws, RECEIVING_STATUS_REPORT_HEADERS)
+
+    for row in rows:
+        doc = row["document"]
+        ws.append(
+            [
+                doc.number,
+                doc.warehouse.name if doc.warehouse else "",
+                row["status_label"],
+                row["days_in_status"],
+                row["qty"],
+                row["categories"],
+            ]
+        )
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
 def timestamp_for_filename() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 

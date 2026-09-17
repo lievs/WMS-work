@@ -182,6 +182,38 @@ def test_unconfirmed_invoice_line_is_not_credited_to_stock(db, client_logged_in)
     assert UnplacedStock.available(wh.id, item.id) == 0
 
 
+def test_defect_on_never_touched_line_still_credits_stock_and_return(db, client_logged_in):
+    """Баг: строка из накладной, кол-во которой совпало с заявленным (на
+    пересчете ее никто не трогал — расхождения не было, confirmed остался
+    False), затем получает брак на разбраковке. complete() пропускает
+    ЛЮБУЮ неподтвержденную строку целиком (см.
+    test_unconfirmed_invoice_line_is_not_credited_to_stock) — без этой
+    защиты выделенный брак и остаток по такой строке тихо терялись бы:
+    ни SupplierReturn, ни UnplacedStock не создавались, хотя кладовщик
+    только что явно поработал со строкой на разбраковке."""
+    wh = _make_warehouse("WH-RS-UNTOUCHED")
+    item = _make_item("7770000298")
+    doc = _make_doc(wh, supplier="ИП Нетронутый", number="RS-UNTOUCHED")
+    line = ReceivingLine(
+        document_id=doc.id, nomenclature_id=item.id, qty=10, expected_qty=10, confirmed=False
+    )
+    db.session.add(line)
+    db.session.commit()
+
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-recount")
+    # Строку на пересчете НЕ трогаем — кол-во и так совпадает с накладной.
+    client_logged_in.post(f"/receiving/{doc.id}/send-to-sorting")
+    client_logged_in.post(f"/receiving/{doc.id}/lines/{line.id}/update-defect", data={"defect_qty": "4"})
+    client_logged_in.post(f"/receiving/{doc.id}/complete")
+
+    assert UnplacedStock.available(wh.id, item.id) == 6  # 10 - 4 брака
+
+    ret = SupplierReturn.query.filter_by(receiving_document_id=doc.id).first()
+    assert ret is not None
+    assert ret.qty == 4
+    assert ret.supplier_name == "ИП Нетронутый"
+
+
 def test_only_sorting_defect_creates_return(db, client_logged_in):
     wh = _make_warehouse("WH-RS-SHORT-2")
     item = _make_item("7770000202")

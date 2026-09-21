@@ -172,6 +172,80 @@ def _ensure_indexes():
             except Exception as exc:  # noqa: BLE001
                 print(f"[schema] Не удалось создать индекс {index_name}: {exc}")
 
+
+def _migrate_shipping_directions():
+    """Backfill canonical destinations and retire import-created warehouses.
+
+    The plan-line table is rebuilt once on old SQLite databases because its
+    historical warehouse_id was NOT NULL.  No plan or movement history is
+    deleted; legacy warehouse ids remain only on historical records.
+    """
+    from .models import ShipmentPlanLine, ShippingDirection, Warehouse
+    from .utils.shipping_directions import canonical_city, direction_key, normalize_marketplace
+    from .blueprints.warehouses import default_fulfillment_1c_name
+
+    inspector = inspect(db.engine)
+    cols = {c["name"]: c for c in inspector.get_columns("shipment_plan_lines")}
+    if db.engine.dialect.name == "sqlite" and cols.get("warehouse_id", {}).get("nullable") is False:
+        with db.engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=OFF"))
+            conn.execute(text("""
+                CREATE TABLE shipment_plan_lines_new (
+                    id INTEGER PRIMARY KEY, plan_id INTEGER NOT NULL REFERENCES shipment_plans(id),
+                    warehouse_id INTEGER REFERENCES warehouses(id),
+                    direction_id INTEGER REFERENCES shipping_directions(id),
+                    nomenclature_id INTEGER REFERENCES nomenclature(id), barcode VARCHAR(50) NOT NULL,
+                    article VARCHAR(200), size VARCHAR(50), planned_qty FLOAT NOT NULL DEFAULT 0,
+                    fulfilled_qty FLOAT NOT NULL DEFAULT 0,
+                    CONSTRAINT uq_plan_warehouse_barcode UNIQUE(plan_id, warehouse_id, barcode),
+                    CONSTRAINT uq_plan_direction_barcode UNIQUE(plan_id, direction_id, barcode)
+                )
+            """))
+            conn.execute(text("""
+                INSERT INTO shipment_plan_lines_new
+                (id, plan_id, warehouse_id, direction_id, nomenclature_id, barcode, article, size, planned_qty, fulfilled_qty)
+                SELECT id, plan_id, warehouse_id, direction_id, nomenclature_id, barcode, article, size, planned_qty, fulfilled_qty
+                FROM shipment_plan_lines
+            """))
+            conn.execute(text("DROP TABLE shipment_plan_lines"))
+            conn.execute(text("ALTER TABLE shipment_plan_lines_new RENAME TO shipment_plan_lines"))
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+        print("[schema] shipment_plan_lines переведен со складов на направления")
+
+    legacy = Warehouse.query.filter(Warehouse.marketplace.isnot(None)).all()
+    for wh in legacy:
+        marketplace = normalize_marketplace(wh.marketplace)
+        city = canonical_city(wh.marketplace_city or wh.name)
+        key = direction_key(marketplace, city)
+        direction = ShippingDirection.query.filter_by(canonical_key=key).first()
+        if direction is None:
+            direction = ShippingDirection(
+                canonical_key=key, marketplace=marketplace, city=city,
+                recipient_info=wh.recipient_info,
+                fulfillment_1c_name=wh.fulfillment_1c_name or default_fulfillment_1c_name(city),
+            )
+            db.session.add(direction)
+            db.session.flush()
+        if direction.legacy_warehouse_id is None:
+            direction.legacy_warehouse_id = wh.id
+        for line in ShipmentPlanLine.query.filter_by(warehouse_id=wh.id).all():
+            duplicate = ShipmentPlanLine.query.filter(
+                ShipmentPlanLine.id != line.id,
+                ShipmentPlanLine.plan_id == line.plan_id,
+                ShipmentPlanLine.direction_id == direction.id,
+                ShipmentPlanLine.barcode == line.barcode,
+            ).first()
+            if duplicate:
+                duplicate.planned_qty += line.planned_qty
+                duplicate.fulfilled_qty = max(duplicate.fulfilled_qty, line.fulfilled_qty)
+                db.session.delete(line)
+            else:
+                line.direction_id = direction.id
+        # Kept as an inactive compatibility record only when historical
+        # movements still reference it; it is no longer a selectable/listed warehouse.
+        wh.is_active = False
+    db.session.commit()
+
     # Идемпотентность добавления товара требует именно уникальности токена,
     # в том числе на базах, где колонка появилась через ALTER TABLE.
     if inspector.has_table("receiving_lines"):
@@ -317,6 +391,7 @@ def create_app(config_class=Config):
 
         db.create_all()
         _ensure_columns()
+        _migrate_shipping_directions()
         _ensure_indexes()
         _bootstrap_admin()
         bootstrap_categories()

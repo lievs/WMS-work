@@ -19,6 +19,7 @@ from ..models import (
     ReceivingLine,
     ShipmentPlan,
     ShipmentPlanLine,
+    ShippingDirection,
     UnplacedStock,
     Warehouse,
 )
@@ -34,6 +35,7 @@ from ..utils.google_sheets import (
     write_wms_movement_sheet,
 )
 from .warehouses import default_fulfillment_1c_name
+from ..utils.shipping_directions import canonical_city, direction_key, normalize_marketplace
 
 bp = Blueprint("shipment_plan", __name__)
 
@@ -47,23 +49,45 @@ _google_sync_lock = threading.Lock()
 _google_sync_started_at = 0.0
 
 
-def _get_or_create_city_warehouse(marketplace, city_name):
-    wh = Warehouse.query.filter_by(marketplace=marketplace, marketplace_city=city_name).first()
-    if wh:
-        return wh
-    wh = Warehouse(
-        code=next_number("warehouse"),
-        name=f"{MARKETPLACE_LABELS[marketplace]}: {city_name}",
+def _get_or_create_shipping_direction(marketplace, city_name):
+    marketplace = normalize_marketplace(marketplace)
+    city = canonical_city(city_name)
+    key = direction_key(marketplace, city)
+    direction = ShippingDirection.query.filter_by(canonical_key=key).first()
+    if direction:
+        if direction.legacy_warehouse is None:
+            legacy = Warehouse(
+                code=next_number("warehouse"), name=direction.name, is_active=False,
+                marketplace=marketplace, marketplace_city=city,
+                fulfillment_1c_name=direction.fulfillment_1c_name,
+            )
+            db.session.add(legacy)
+            db.session.flush()
+            direction.legacy_warehouse = legacy
+            db.session.flush()
+        return direction
+    direction = ShippingDirection(
+        canonical_key=key,
         marketplace=marketplace,
-        marketplace_city=city_name,
-        # Стартовая догадка склада 1С по городу (см.
-        # warehouses.FULFILLMENT_1C_DEFAULTS) — для неизвестных городов
-        # останется пустым, администратор донастроит на странице «Настройки».
-        fulfillment_1c_name=default_fulfillment_1c_name(city_name),
+        city=city,
+        fulfillment_1c_name=default_fulfillment_1c_name(city),
     )
-    db.session.add(wh)
+    db.session.add(direction)
     db.session.flush()
-    return wh
+    legacy = Warehouse(
+        code=next_number("warehouse"), name=direction.name, is_active=False,
+        marketplace=marketplace, marketplace_city=city,
+        fulfillment_1c_name=direction.fulfillment_1c_name,
+    )
+    db.session.add(legacy)
+    db.session.flush()
+    direction.legacy_warehouse = legacy
+    db.session.flush()
+    return direction
+
+
+# Compatibility for extensions/tests importing the former helper.
+_get_or_create_city_warehouse = _get_or_create_shipping_direction
 
 
 def _received_since_by_warehouse_and_item(window_start, window_end):
@@ -94,7 +118,15 @@ def _received_since_by_warehouse_and_item(window_start, window_end):
         .group_by(MovementDocument.to_warehouse_id, BoxItem.nomenclature_id)
         .all()
     )
-    return {(wh_id, nom_id): qty or 0 for wh_id, nom_id, qty in rows}
+    warehouses = {w.id: w for w in Warehouse.query.filter(Warehouse.id.in_([r[0] for r in rows])).all()}
+    result = {}
+    for wh_id, nom_id, qty in rows:
+        wh = warehouses.get(wh_id)
+        if not wh or not wh.marketplace:
+            continue
+        key = (direction_key(wh.marketplace, wh.marketplace_city or wh.name), nom_id)
+        result[key] = result.get(key, 0) + (qty or 0)
+    return result
 
 
 def _apply_plan(marketplace, parsed, uploaded_by_id=None):
@@ -111,8 +143,8 @@ def _apply_plan(marketplace, parsed, uploaded_by_id=None):
 
     plan.lines.delete()
 
-    city_warehouses = {
-        city: _get_or_create_city_warehouse(marketplace, city) for city in parsed.cities
+    city_directions = {
+        city: _get_or_create_shipping_direction(marketplace, city) for city in parsed.cities
     }
 
     barcodes = {row["barcode"] for row in parsed.rows}
@@ -144,7 +176,7 @@ def _apply_plan(marketplace, parsed, uploaded_by_id=None):
     # уникальном ограничении (plan, склад, штрихкод).
     merged = {}
     for row in parsed.rows:
-        key = (row["city"], row["barcode"])
+        key = (direction_key(marketplace, row["city"]), row["barcode"])
         if key in merged:
             merged[key]["qty"] += row["qty"]
             merged[key]["fact"] += row["fact"]
@@ -160,7 +192,8 @@ def _apply_plan(marketplace, parsed, uploaded_by_id=None):
         db.session.add(
             ShipmentPlanLine(
                 plan=plan,
-                warehouse_id=city_warehouses[row["city"]].id,
+                direction_id=city_directions[row["city"]].id,
+                warehouse_id=city_directions[row["city"]].legacy_warehouse_id,
                 nomenclature_id=nomenclature.id if nomenclature else None,
                 barcode=row["barcode"],
                 article=row["article"],
@@ -174,7 +207,10 @@ def _apply_plan(marketplace, parsed, uploaded_by_id=None):
                 fulfilled_qty=max(
                     row.get("fact", 0.0),
                     wms_received.get(
-                        (city_warehouses[row["city"]].id, nomenclature.id), 0.0
+                        # Old received movements still point at legacy city
+                        # warehouses; migration preserves their accumulated
+                        # fact in existing fulfilled_qty / imported fact.
+                        (direction_key(marketplace, row["city"]), nomenclature.id), 0.0
                     )
                     if nomenclature
                     else 0.0,
@@ -474,7 +510,22 @@ def _in_transit_by_warehouse_and_item():
         .group_by(MovementDocument.to_warehouse_id, BoxItem.nomenclature_id)
         .all()
     )
-    return {(wh_id, nom_id): qty or 0 for wh_id, nom_id, qty in rows}
+    warehouses = {w.id: w for w in Warehouse.query.filter(Warehouse.id.in_([r[0] for r in rows])).all()}
+    directions = {d.canonical_key: d.id for d in ShippingDirection.query.all()}
+    result = {}
+    for wh_id, nom_id, qty in rows:
+        wh = warehouses.get(wh_id)
+        if not wh or not wh.marketplace:
+            continue
+        destination_id = directions.get(direction_key(wh.marketplace, wh.marketplace_city or wh.name))
+        # Direction-based plans use ('direction', id); legacy/tests may
+        # still contain warehouse-based lines, so publish that key too.
+        if destination_id:
+            key = ("direction", destination_id, nom_id)
+            result[key] = result.get(key, 0) + (qty or 0)
+        key = ("warehouse", wh_id, nom_id)
+        result[key] = result.get(key, 0) + (qty or 0)
+    return result
 
 
 def _pace_analysis(plan, total_planned, total_fulfilled):
@@ -530,8 +581,9 @@ def dashboard():
         unplaced_stock[nomenclature_id] = unplaced_stock.get(nomenclature_id, 0) + qty
     in_transit_by_item = _in_transit_by_warehouse_and_item()
     in_transit_by_warehouse = {}
-    for (wh_id, _nom_id), qty in in_transit_by_item.items():
-        in_transit_by_warehouse[wh_id] = in_transit_by_warehouse.get(wh_id, 0) + qty
+    for (kind, target_id, _nom_id), qty in in_transit_by_item.items():
+        key = (kind, target_id)
+        in_transit_by_warehouse[key] = in_transit_by_warehouse.get(key, 0) + qty
 
     marketplaces_data = []
     lines_by_marketplace = {}
@@ -553,19 +605,25 @@ def dashboard():
         # нему остается открытым (тот же принцип, что и у fulfilled_qty,
         # которая тоже засчитывается только по факту приемки).
         for line in lines:
-            line.in_transit_qty = in_transit_by_item.get((line.warehouse_id, line.nomenclature_id), 0)
+            kind, target_id = ("direction", line.direction_id) if line.direction_id else ("warehouse", line.warehouse_id)
+            line.in_transit_qty = in_transit_by_item.get((kind, target_id, line.nomenclature_id), 0)
 
         by_warehouse = {}
         for line in lines:
             row = by_warehouse.setdefault(
-                line.warehouse_id,
-                {"warehouse": line.warehouse, "planned": 0, "fulfilled": 0},
+                line.direction_id or -line.warehouse_id,
+                {
+                    "warehouse": line.destination,
+                    "target_key": ("direction", line.direction_id) if line.direction_id else ("warehouse", line.warehouse_id),
+                    "planned": 0,
+                    "fulfilled": 0,
+                },
             )
             row["planned"] += line.planned_qty
             row["fulfilled"] += line.fulfilled_qty
         cities = sorted(by_warehouse.values(), key=lambda r: r["warehouse"].marketplace_city)
         for row in cities:
-            row["in_transit"] = in_transit_by_warehouse.get(row["warehouse"].id, 0)
+            row["in_transit"] = in_transit_by_warehouse.get(row["target_key"], 0)
 
         # Штрихкоды с невыполненным остатком, для которых нечем отгружать —
         # только для значка-счетчика на карточке; сам список товаров теперь
@@ -642,7 +700,7 @@ def dashboard():
                     "in_transit_total": 0,
                 },
             )
-            product[marketplace][line.warehouse.marketplace_city] = line
+            product[marketplace][line.destination.marketplace_city] = line
             product["max_remaining"] = max(product["max_remaining"], line.remaining_qty())
             product["in_transit_total"] += line.in_transit_qty
 

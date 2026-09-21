@@ -28,6 +28,8 @@
       <h5>Что ждет выгрузки</h5>
       <p>Перемещений (завершенных): <b>{{ pending_movements }}</b></p>
       <p>Инвентаризаций (завершенных): <b>{{ pending_inventories }}</b></p>
+      <p>Пересчетов приемки (для обновления приходной накладной):
+        <b>{{ pending_receiving_recounts }}</b></p>
       <p>Возвратов поставщику (из разбраковки приемок): <b>{{ pending_supplier_returns }}</b>
         — <a href="{{ url_for('receiving.returns_list') }}">список со статусом выгрузки</a></p>
       <p class="text-muted small mb-0">
@@ -37,12 +39,9 @@
       </p>
       <p class="text-muted small mb-0 mt-2">
         Возврат поставщику 1С привязывает к «Заказу поставщику» по полю
-        «№ заявки» приемки — надежнее всего вносить туда полный номер из
-        реквизита «Номер» (например «ШМ-005»). Короткое число из заголовка
-        формы («Заказ поставщику 5 от …» → 5) тоже сработает, но только
-        если у приемки указан поставщик и он совпадает с поставщиком
-        найденного заказа — короткие номера у разных площадок/поставщиков
-        нередко совпадают (например «ШМ-005» и «ОЗ-К05» — у обоих «5»).
+        «№ заявки» приемки — указывайте полное значение реквизита «Номер»
+        (например <code>OZ Ж-001</code>), включая префикс, пробелы, дефис и
+        ведущие нули. Короткий номер из заголовка формы не используется.
       </p>
     </div>
 
@@ -50,7 +49,7 @@
       <h5>Адрес для обработки в 1С</h5>
       <p class="text-muted small mb-1">Получить документы (GET, токен — заголовком <code>X-1C-Token</code> или параметром <code>?token=</code>):</p>
       <code class="d-block mb-2">{{ request.url_root }}integrations/1c/api/export</code>
-      <p class="text-muted small mb-1">Подтвердить прием (POST, JSON <code>{"movement_ids": [...], "inventory_ids": [...], "supplier_return_ids": [...]}</code>):</p>
+      <p class="text-muted small mb-1">Подтвердить прием (POST, JSON <code>{"movement_ids": [...], "inventory_ids": [...], "receiving_recount_ids": [...], "supplier_return_ids": [...]}</code>):</p>
       <code class="d-block">{{ request.url_root }}integrations/1c/api/export/confirm</code>
     </div>
   </div>

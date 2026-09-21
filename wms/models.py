@@ -219,6 +219,33 @@ class Warehouse(db.Model):
         return f"<Warehouse {self.code}>"
 
 
+class ShippingDirection(db.Model):
+    """Marketplace + canonical destination city; not a storage warehouse."""
+
+    __tablename__ = "shipping_directions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    canonical_key = db.Column(db.String(160), unique=True, nullable=False, index=True)
+    marketplace = db.Column(db.String(20), nullable=False, index=True)
+    city = db.Column(db.String(100), nullable=False)
+    recipient_info = db.Column(db.String(300), nullable=True)
+    fulfillment_1c_name = db.Column(db.String(200), nullable=True)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    # Compatibility endpoint used by the existing movement workflow. It is
+    # never exposed as a storage warehouse in the UI.
+    legacy_warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=True)
+    legacy_warehouse = db.relationship("Warehouse")
+
+    @property
+    def name(self):
+        from .utils.shipping_directions import direction_name
+        return direction_name(self.marketplace, self.city)
+
+    @property
+    def marketplace_city(self):
+        return self.city
+
+
 class Zone(db.Model):
     """Зона склада — объединяет несколько ячеек (стеллаж/ряд/участок).
     Печатается как крупная A4-этикетка для навешивания на стеллаж/вход в зону."""
@@ -587,6 +614,11 @@ class ReceivingDocument(db.Model):
     recounting_started_at = db.Column(db.DateTime, nullable=True)
     sorting_started_at = db.Column(db.DateTime, nullable=True)
     completed_at = db.Column(db.DateTime)
+    # Когда 1С подтвердила, что количество в исходной приходной накладной
+    # обновлено по результатам пересчета WMS. Отдельно от completed_at:
+    # пересчет заканчивается при переходе в sorting, а разбраковка и
+    # окончательное завершение приемки происходят позже.
+    recount_synced_to_1c_at = db.Column(db.DateTime, nullable=True)
     # Номер заказа поставщику ("№ заказа" в интерфейсе) — вносится вручную
     # при загрузке накладной,
     # т.к. в самом файле от 1С его нет (это внутренний номер, по которому
@@ -968,7 +1000,10 @@ class ShipmentPlanLine(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     plan_id = db.Column(db.Integer, db.ForeignKey("shipment_plans.id"), nullable=False)
-    warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=False, index=True)
+    # warehouse_id is retained only for safe migration of old databases.
+    # New imports use direction_id and never create Warehouse rows.
+    warehouse_id = db.Column(db.Integer, db.ForeignKey("warehouses.id"), nullable=True, index=True)
+    direction_id = db.Column(db.Integer, db.ForeignKey("shipping_directions.id"), nullable=True, index=True)
     # Пусто, если штрихкод из плана не найден в номенклатуре — строка все
     # равно сохраняется, чтобы такие позиции было видно на дашборде.
     nomenclature_id = db.Column(db.Integer, db.ForeignKey("nomenclature.id"), nullable=True, index=True)
@@ -979,14 +1014,20 @@ class ShipmentPlanLine(db.Model):
     fulfilled_qty = db.Column(db.Float, nullable=False, default=0)
 
     warehouse = db.relationship("Warehouse")
+    direction = db.relationship("ShippingDirection")
     nomenclature = db.relationship("Nomenclature")
 
     __table_args__ = (
         db.UniqueConstraint("plan_id", "warehouse_id", "barcode", name="uq_plan_warehouse_barcode"),
+        db.UniqueConstraint("plan_id", "direction_id", "barcode", name="uq_plan_direction_barcode"),
     )
 
     def remaining_qty(self):
         return max(self.planned_qty - self.fulfilled_qty, 0)
+
+    @property
+    def destination(self):
+        return self.direction or self.warehouse
 
 
 class SupplierReturn(db.Model):

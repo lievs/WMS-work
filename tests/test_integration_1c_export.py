@@ -16,6 +16,7 @@ from wms.models import (
     MovementLine,
     Nomenclature,
     ReceivingDocument,
+    ReceivingLine,
     SupplierReturn,
     Warehouse,
 )
@@ -224,6 +225,79 @@ def test_export_groups_supplier_returns_by_receiving_document(db, client_logged_
     assert ret_doc["order_number"] == "Ш-00105"
     assert ret_doc["supplier"] == "ИП Тестов"
     assert {line["qty"] for line in ret_doc["lines"]} == {3, 1}
+
+
+def test_export_includes_completed_receiving_recount_and_confirms_it(db, client_logged_in):
+    _set_token()
+    wh = Warehouse(code="WH-1C-RECOUNT", name="Основной склад")
+    db.session.add(wh)
+    db.session.commit()
+    item = _make_item("9990000010", "Товар после пересчета")
+    doc = ReceivingDocument(
+        number="1892",
+        warehouse_id=wh.id,
+        supplier="ИП Тестов",
+        invoice_file_name="Приходная 1892.xlsx",
+        status="sorting",
+    )
+    db.session.add(doc)
+    db.session.commit()
+    db.session.add(
+        ReceivingLine(
+            document_id=doc.id,
+            nomenclature_id=item.id,
+            expected_qty=60,
+            qty=93,
+            confirmed=True,
+        )
+    )
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    recount = next(r for r in resp.get_json()["receiving_recounts"] if r["id"] == doc.id)
+    assert recount["invoice_number"] == "1892"
+    assert recount["warehouse"] == "Основной склад"
+    assert recount["lines"] == [
+        {"barcode": "9990000010", "name": "Товар после пересчета", "qty": 93.0}
+    ]
+
+    resp = client_logged_in.post(
+        "/integrations/1c/api/export/confirm",
+        data=json.dumps(
+            {
+                "movement_ids": [],
+                "inventory_ids": [],
+                "receiving_recount_ids": [doc.id],
+                "supplier_return_ids": [],
+            }
+        ),
+        content_type="application/json",
+        headers={"X-1C-Token": TOKEN},
+    )
+    assert resp.get_json()["confirmed"]["receiving_recounts"] == 1
+    assert ReceivingDocument.query.get(doc.id).recount_synced_to_1c_at is not None
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    assert all(r["id"] != doc.id for r in resp.get_json()["receiving_recounts"])
+
+
+def test_export_does_not_include_receiving_recount_before_sorting(db, client_logged_in):
+    _set_token()
+    wh = Warehouse(code="WH-1C-RECOUNT-DRAFT", name="Основной склад")
+    db.session.add(wh)
+    db.session.commit()
+    doc = ReceivingDocument(
+        number="1893",
+        warehouse_id=wh.id,
+        supplier="ИП Тестов",
+        invoice_file_name="Приходная 1893.xlsx",
+        status="recounting",
+    )
+    db.session.add(doc)
+    db.session.commit()
+
+    resp = client_logged_in.get("/integrations/1c/api/export", headers={"X-1C-Token": TOKEN})
+    assert all(r["id"] != doc.id for r in resp.get_json()["receiving_recounts"])
 
 
 def test_export_confirm_marks_everything_synced(db, client_logged_in):

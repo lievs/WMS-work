@@ -156,7 +156,7 @@ def build_wms_movement_rows():
     # Если в плане есть более подходящий артикул, используем его вместо
     # внутреннего SKU номенклатуры.
     article_by_key = {
-        (line.plan.marketplace, line.warehouse.marketplace_city, line.barcode): line.article
+        (line.plan.marketplace, line.destination.marketplace_city, line.barcode): line.article
         for line in ShipmentPlanLine.query.all()
         if line.article
     }

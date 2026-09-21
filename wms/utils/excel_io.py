@@ -419,7 +419,7 @@ def export_shipment_plan_to_excel(lines) -> bytes:
         ws.append(
             [
                 marketplace_labels.get(line.plan.marketplace, line.plan.marketplace),
-                line.warehouse.marketplace_city if line.warehouse else "",
+                line.destination.marketplace_city if line.destination else "",
                 line.article,
                 line.size,
                 line.barcode,

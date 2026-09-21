@@ -2,7 +2,7 @@ from flask import Blueprint, flash, redirect, render_template, request, url_for
 from flask_login import current_user
 
 from ..extensions import db
-from ..models import Box, Cell, ShipmentPlanLine, Warehouse, Zone
+from ..models import Box, Cell, ShippingDirection, Warehouse, Zone
 from ..utils.numbering import next_number
 
 bp = Blueprint("warehouses", __name__)
@@ -69,13 +69,12 @@ def list_warehouses():
     # поэтому список показываем полностью, но помечаем у каждого
     # склада-города, есть ли он в текущем плане, чтобы можно было
     # ориентироваться и вручную отключить неактуальные.
-    active_city_warehouse_ids = {
-        row[0] for row in db.session.query(ShipmentPlanLine.warehouse_id).distinct()
-    }
-    warehouses = Warehouse.query.order_by(Warehouse.code).all()
-    for wh in warehouses:
-        wh.in_current_plan = wh.marketplace is None or wh.id in active_city_warehouse_ids
-    fulfillment_warehouses = [wh for wh in warehouses if wh.marketplace is not None]
+    # Only physical storage warehouses belong in this register. Marketplace
+    # destinations are maintained separately as ShippingDirection rows.
+    warehouses = Warehouse.query.filter(Warehouse.marketplace.is_(None)).order_by(Warehouse.code).all()
+    fulfillment_warehouses = ShippingDirection.query.order_by(
+        ShippingDirection.marketplace, ShippingDirection.city
+    ).all()
     return render_template(
         "warehouses/list.html",
         warehouses=warehouses,
@@ -125,7 +124,7 @@ def update_recipient(warehouse_id):
     return redirect(url_for("auth.users"))
 
 
-@bp.route("/<int:warehouse_id>/fulfillment-1c-name", methods=["POST"])
+@bp.route("/directions/<int:warehouse_id>/fulfillment-1c-name", methods=["POST"])
 def update_fulfillment_1c_name(warehouse_id):
     """Склад 1С для КОНКРЕТНОГО склада-города — раздельно для ОЗОН и ВБ даже
     в одном городе: одна и та же площадка одного города может возить на
@@ -138,13 +137,25 @@ def update_fulfillment_1c_name(warehouse_id):
         flash("У вас нет права на сопоставление складов с 1С", "danger")
         return redirect(url_for("warehouses.list_warehouses"))
 
-    wh = Warehouse.query.get_or_404(warehouse_id)
+    wh = ShippingDirection.query.get_or_404(warehouse_id)
     wh.fulfillment_1c_name = request.form.get("fulfillment_1c_name", "").strip() or None
     db.session.commit()
     if wh.fulfillment_1c_name:
         flash(f"Склад 1С для «{wh.name}» обновлен: «{wh.fulfillment_1c_name}»", "success")
     else:
         flash(f"Склад 1С для «{wh.name}» очищен — будет использован общий запасной склад", "success")
+    return redirect(url_for("warehouses.list_warehouses"))
+
+
+@bp.route("/<int:warehouse_id>/fulfillment-1c-name", methods=["POST"])
+def update_legacy_fulfillment_1c_name(warehouse_id):
+    """Compatibility for historical destination-as-Warehouse records."""
+    if not current_user.can_manage_warehouse_mapping():
+        flash("У вас нет права на сопоставление складов с 1С", "danger")
+        return redirect(url_for("warehouses.list_warehouses"))
+    wh = Warehouse.query.get_or_404(warehouse_id)
+    wh.fulfillment_1c_name = request.form.get("fulfillment_1c_name", "").strip() or None
+    db.session.commit()
     return redirect(url_for("warehouses.list_warehouses"))
 
 

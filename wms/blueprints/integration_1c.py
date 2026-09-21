@@ -15,7 +15,14 @@ from flask import Blueprint, flash, jsonify, redirect, render_template, request,
 from flask_login import current_user
 
 from ..extensions import db
-from ..models import AppSetting, InventoryDocument, MovementDocument, SupplierReturn
+from ..models import (
+    AppSetting,
+    InventoryDocument,
+    MovementDocument,
+    ReceivingDocument,
+    ReceivingLine,
+    SupplierReturn,
+)
 
 bp = Blueprint("integration_1c", __name__)
 
@@ -99,6 +106,11 @@ def settings():
         SupplierReturn.synced_to_1c_at.is_(None),
         SupplierReturn.invoice_number.isnot(None),
     ).count()
+    pending_receiving_recounts = ReceivingDocument.query.filter(
+        ReceivingDocument.status.in_(("sorting", "completed")),
+        ReceivingDocument.invoice_file_name.isnot(None),
+        ReceivingDocument.recount_synced_to_1c_at.is_(None),
+    ).count()
 
     return render_template(
         "integration_1c/settings.html",
@@ -106,6 +118,7 @@ def settings():
         pending_movements=pending_movements,
         pending_inventories=pending_inventories,
         pending_supplier_returns=pending_supplier_returns,
+        pending_receiving_recounts=pending_receiving_recounts,
     )
 
 
@@ -225,6 +238,42 @@ def _supplier_returns_export():
     return payloads
 
 
+def _receiving_recounts_export():
+    """Пересчитанные приемки из загруженных накладных.
+
+    После перехода приемки в ``sorting`` фактическое количество уже
+    зафиксировано в ReceivingLine.qty. 1С находит исходную приходную
+    накладную по входящему номеру из файла и заменяет количества в ее
+    строках. Подтверждение от 1С заполняет recount_synced_to_1c_at, поэтому
+    повторный запуск обработки не правит одну накладную второй раз.
+    """
+    documents = (
+        ReceivingDocument.query.filter(
+            ReceivingDocument.status.in_(("sorting", "completed")),
+            ReceivingDocument.invoice_file_name.isnot(None),
+            ReceivingDocument.recount_synced_to_1c_at.is_(None),
+        )
+        .order_by(ReceivingDocument.id)
+        .all()
+    )
+    return [
+        {
+            "id": doc.id,
+            "invoice_number": doc.number,
+            "warehouse": doc.warehouse.name if doc.warehouse else "",
+            "lines": [
+                {
+                    "barcode": line.nomenclature.barcode,
+                    "name": line.nomenclature.name,
+                    "qty": line.qty,
+                }
+                for line in doc.lines.order_by(ReceivingLine.id)
+            ],
+        }
+        for doc in documents
+    ]
+
+
 @bp.route("/api/export")
 def export():
     """Отдает документы, готовые к переносу в 1С: перемещение — сразу как
@@ -257,6 +306,7 @@ def export():
             "ok": True,
             "movements": [_movement_payload(d) for d in movements],
             "inventories": [_inventory_payload(d) for d in inventories],
+            "receiving_recounts": _receiving_recounts_export(),
             "supplier_returns": _supplier_returns_export(),
         }
     )
@@ -275,6 +325,7 @@ def export_confirm():
     movement_ids = data.get("movement_ids") or []
     inventory_ids = data.get("inventory_ids") or []
     supplier_return_ids = data.get("supplier_return_ids") or []
+    receiving_recount_ids = data.get("receiving_recount_ids") or []
     # {str(movement_id): "текст предупреждения"} — часть строк документа не
     # сопоставилась с номенклатурой в 1С и была пропущена (см. SyncWMS.bsl
     # СоздатьПеремещениеТоваров); документ при этом всё равно создан и
@@ -313,6 +364,15 @@ def export_confirm():
     for ret in confirmed_returns:
         ret.synced_to_1c_at = now
 
+    confirmed_recounts = (
+        ReceivingDocument.query.filter(
+            ReceivingDocument.id.in_(receiving_recount_ids),
+            ReceivingDocument.recount_synced_to_1c_at.is_(None),
+        ).all()
+    )
+    for doc in confirmed_recounts:
+        doc.recount_synced_to_1c_at = now
+
     db.session.commit()
     return jsonify(
         {
@@ -321,6 +381,7 @@ def export_confirm():
                 "movements": len(confirmed_movements),
                 "inventories": len(confirmed_inventories),
                 "supplier_returns": len(confirmed_returns),
+                "receiving_recounts": len(confirmed_recounts),
             },
         }
     )
